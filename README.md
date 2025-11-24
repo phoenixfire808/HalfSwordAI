@@ -8,6 +8,8 @@
 
 This project implements a complete AI agent system that learns to play [Half Sword](https://halfswordgames.com/), a physics-based medieval combat game. The system combines deep reinforcement learning (DQN/PPO), computer vision (YOLO), and human-in-the-loop learning (DAgger) to master the complex physics-based combat mechanics.
 
+This is a machine learning project for Half Sword which utilizes a human-in-the-loop component in addition to machine learning.
+
 ## 🎯 Features
 
 - **Real-time Reinforcement Learning**: Continuous online training with DQN/PPO algorithms
@@ -32,8 +34,8 @@ This project implements a complete AI agent system that learns to play [Half Swo
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
-   cd "ai butler 2"
+   git clone https://github.com/phoenixfire808/HalfSwordAI.git
+   cd HalfSwordAI
    ```
 
 2. **Install dependencies**
