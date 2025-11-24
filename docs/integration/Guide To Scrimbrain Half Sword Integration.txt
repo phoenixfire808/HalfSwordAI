@@ -1,0 +1,452 @@
+﻿Autonomous Agent Development for Physics-Based Combat Simulations: A Technical Implementation Framework Using ScrimBrain and Cursor AI
+
+
+
+
+Executive Summary
+
+
+The intersection of deep reinforcement learning (DRL), computer vision, and generative AI development tools presents a transformative opportunity for automated game testing and non-player character (NPC) design. This report details a comprehensive technical framework for adapting the ScrimBrain architecture—originally developed for Fortnite—to the physics-based medieval combat simulator Half Sword. This adaptation is engineered through the advanced capabilities of Cursor AI, utilizing its "Composer" and "Context" features to refactor the codebase for a continuous-control environment.
+The core technical challenge addressed herein is the fundamental transposition of an agent designed for a discrete, event-driven shooter (Fortnite) into a high-fidelity, ragdoll-physics simulation (Half Sword) where input timing, momentum, and continuous mouse gestures determine survival. Unlike Fortnite, where actions are binary (build/shoot), Half Sword requires nuanced mouse trajectory control for directional strikes and parries. This report analyzes the necessary transformations in the action space, the implementation of optical character recognition (OCR) for reward shaping in "Abyss" mode, and the utilization of low-level Windows API injection for input simulation. Furthermore, strictly technical considerations regarding ctypes input handling, anti-cheat compliance, and reinforcement learning algorithm selection (DQN vs. PPO) are exhaustively analyzed to ensure a functional and safe development environment.
+
+
+1. Introduction: The Convergence of Visual Reinforcement Learning and Generative Coding
+
+
+The landscape of game artificial intelligence is shifting from access-based heuristics—where bots read memory addresses directly—to visual-based reinforcement learning, where agents perceive the game solely through screen pixels, mimicking human interaction. The ScrimBrain repository 1 represents a seminal open-source implementation of this philosophy, utilizing a Deep Q-Network (DQN) to play Fortnite by interpreting visual data and simulating Windows inputs. However, applying this architecture to a physics-based brawler like Half Sword 4 introduces significant complexity due to the "analog" nature of its combat.
+Simultaneously, the software development lifecycle for such complex adaptations has been compressed by AI-integrated development environments like Cursor AI.6 Cursor’s ability to index entire codebases and perform multi-file refactoring via its "Composer" feature allows developers to rapidly port RL pipelines between disparate game engines. This report serves as a definitive implementation guide, dissecting the theoretical and practical steps required to bridge these technologies.
+
+
+1.1 Scope of the Implementation
+
+
+This framework targets the "Half Sword" environment, specifically the "Abyss" mode or "Playtest" demo builds.8 The objective is to construct an autonomous agent capable of:
+1. Visual Perception: capturing game state via raw pixel analysis without memory hooking.
+2. Physics-Aware Control: executing complex mouse gestures (swings, thrusts, parries) via simulated human input.
+3. Self-Correction: utilizing reinforcement learning to optimize combat strategy based on visual rewards (score/survival).
+
+
+1.2 The ScrimBrain Architecture Baseline
+
+
+ScrimBrain provides the foundational scaffolding. It is built on PyTorch and utilizes a standard Reinforcement Learning (RL) loop: Observation $\rightarrow$ Policy $\rightarrow$ Action $\rightarrow$ Reward.
+* Observation: Real-time screen capture reshaped into tensors.
+* Policy: A Convolutional Neural Network (CNN) extracting features (walls, enemies) feeding into a Q-learning head.
+* Action: Discrete key presses simulated via Windows API.
+* Reward: Derived from in-game events (kills, placement).3
+The adaptation of this system requires a complete overhaul of the Action and Reward modules to accommodate Half Sword's specific mechanics.
+________________
+
+
+2. Theoretical Framework: Reinforcement Learning in Continuous Physics Domains
+
+
+To successfully port ScrimBrain, one must first understand the theoretical divergence between the source domain (Fortnite) and target domain (Half Sword).
+
+
+2.1 The Discrete vs. Continuous Control Dilemma
+
+
+Deep Q-Networks (DQN), the algorithm utilized by ScrimBrain 3, are mathematically formulated for discrete action spaces. In Fortnite, the decision to "Build Wall" is a categorical choice ($a \in \{0, 1,..., N\}$). The network outputs a Q-value for each possible button press, and the agent selects the action with the maximum expected utility.
+Half Sword, however, operates in a continuous control domain. The positioning of the weapon is determined by the continuous X and Y coordinates of the mouse.10 A "strike" is not a button press but a trajectory—a vector moving over time.
+* The Physics of Half Sword: The game utilizes active ragdoll physics. The avatar's hands follow the mouse cursor, but they possess mass and inertia. Rapid movements generate momentum for damage, while slow movements are used for alignment and guarding.12
+* DQN Incompatibility: Applying raw DQN to continuous mouse movement is non-trivial. It typically requires discretizing the continuous space into "bins" (e.g., "Move Mouse Up-Left Fast", "Move Mouse Down Slow"), effectively turning a continuous problem into a high-dimensional discrete one.14
+
+
+2.2 Algorithm Selection: Adapting DQN vs. Migrating to PPO
+
+
+While ScrimBrain uses DQN, state-of-the-art results in continuous control (like robotics or physics simulations) often utilize Proximal Policy Optimization (PPO) or Soft Actor-Critic (SAC).14 PPO allows the policy network to output a probability distribution (Gaussian) over continuous values (e.g., exactly how fast to move the mouse in the X direction).
+However, migrating the entire codebase from DQN to PPO is a significant architectural change. For the purpose of this implementation guide—which focuses on using ScrimBrain—the recommended strategy is Action Space Discretization. By mapping continuous gestures to a finite set of "Macro-Actions" (see Table 1), we maintain compatibility with the existing ScrimBrain DQN infrastructure while enabling physics-based control.
+
+
+2.3 Visual Perception in Low-UI Environments
+
+
+Fortnite provides distinct UI elements and high-contrast visuals. Half Sword is minimalist, lacking health bars or damage numbers.17
+* State Ambiguity: The agent cannot easily determine its health or the enemy's status through pixel analysis alone.
+* Reward Sparsity: In the absence of immediate feedback (like hitmarkers), the agent suffers from sparse rewards. It may fight for 30 seconds and die without knowing if it landed any effective hits.
+* Solution: We must rely on the "Abyss" mode UI, which provides a score counter 19, or implement complex computer vision (e.g., detecting blood particles or specific "wince" animations) to shape the reward function.21
+________________
+
+
+3. Environment Analysis: Half Sword Mechanics and Inputs
+
+
+A robust agent requires a precise interface with the game's mechanics. Half Sword's control scheme is unique and must be rigorously mapped to the agent's output capabilities.
+
+
+3.1 Mouse Control and Weapon Physics
+
+
+The mouse is the primary manipulator. Unlike shooter games where the mouse controls the camera (view angle), in Half Sword, the mouse often controls the hands directly relative to the body, or the camera with a "lock-on" mechanic.4
+* Direct Control: Moving the mouse right moves the weapon to the right side of the screen.
+* Momentum Generation: Damage is calculated based on the velocity of the weapon upon impact. The agent must learn to "swing" the mouse—generating a high delta ($dx, dy$) over a short timeframe—rather than just "placing" the cursor.12
+* Thrusting: This requires a combination of key presses (Alt) and mouse movement, creating a composite action that the agent must execute synchronously.5
+
+
+3.2 The "Passive Parry" System
+
+
+Understanding the "Passive Parry" or auto-block mechanic is critical for the agent's defensive capability.
+* Mechanism: When the player holds the weapon in a neutral position relative to an incoming attack, the game’s physics engine (and assisted blockers) attempts to intercept the strike.24
+* Implication for RL: The agent does not need to learn frame-perfect active parries initially. A "Neutral/Reset" action that centers the mouse cursor on the opponent's torso is a highly effective defensive strategy. The implementation must ensure the agent has an action that minimizes mouse velocity to leverage this passive defense.27
+
+
+3.3 Visual Signals and OCR Targets
+
+
+To facilitate reinforcement learning, we must identify trackable visual elements.
+* Score Counter: In Abyss mode, a numerical score indicates progress. This is the primary target for Optical Character Recognition (OCR).20
+* Death Screen: The "You Died" text or the specific red-tinted overlay serves as the "Terminal State" signal ($Done = True$).29
+* Stamina: If visible (or inferable through character panting audio/visual sway), this serves as a state constraint. The agent must learn not to exhaust stamina.31
+________________
+
+
+4. Development Environment Configuration Using Cursor AI
+
+
+The implementation relies heavily on Cursor AI to bridge the gap between the original Fortnite code and the new Half Sword requirements. Cursor is not merely an editor; it is an AI-powered refactoring engine that can understand project-wide context.
+
+
+4.1 Setup and "Codebase" Indexing
+
+
+To utilize Cursor effectively, the entire ScrimBrain repository must be indexed.
+1. Clone Repository: git clone https://github.com/wkwan/scrimbrain.
+2. Open in Cursor: Launch Cursor and open the folder.
+3. Indexing: Ensure the "Codebase" feature is enabled in settings. This allows the AI to read all .py files to understand the dependency graph between agent.py, train_model.py, and environment.py.32
+
+
+4.2 Establishing .cursorrules for Quality Control
+
+
+To prevent the AI from generating generic or incorrect code (e.g., using pyautogui instead of ctypes), we must define strict project rules. Create a file named .cursorrules in the root directory.6
+Recommended Content for .cursorrules:
+
+
+Half Sword RL Project Rules
+
+
+1. Input Simulation: ALWAYS use ctypes.windll.user32.SendInput for mouse and keyboard events. DO NOT use pyautogui, pynput, or selenium. The game requires DirectInput-compatible scan codes.
+2. Coordinate System: Mouse movements must be RELATIVE (MOUSEEVENTF_MOVE). Do not use absolute coordinates as the game engine calculates weapon velocity from deltas.
+3. Performance: Screen capture must use mss or d3dshot. Do not use PIL.ImageGrab as it is too slow for real-time physics inference.
+4. Refactoring: When porting from Fortnite to Half Sword, preserve the DQN class structure but completely rewrite the step() and reset() methods in the environment class.
+5. Style: Follow PEP8. Use Type Hints for all function definitions.
+
+
+4.3 Utilization of "Composer" for Architectural Refactoring
+
+
+The "Composer" feature (accessed via Cmd+I or Ctrl+I) allows for multi-file edits based on a single prompt. This is essential for renaming and repurposing the core environment files.34
+Sample Composer Workflow:
+Prompt: "Refactor fortnite_env.py into a new file halfsword_env.py. Rename the class to HalfSwordEnv. Remove all references to 'building', 'materials', and 'shooting'. Replace the discrete action mapping with a placeholder dictionary for 'directional_swings'. Keep the screen capture logic but update the window title target to 'Half Sword'."
+This prompt instructs Cursor to strip the game-specific logic while preserving the RL skeleton, saving hours of manual deletion and syntax correction.32
+________________
+
+
+5. Technical Implementation: Input Simulation Layer
+
+
+The most critical component of this adaptation is the Input Simulation Layer. Because Half Sword relies on physics, the quality of the input is paramount. A simple discrete "click" is insufficient; the system must simulate the trajectory of a human hand.
+
+
+5.1 The ctypes Interface for DirectInput
+
+
+Standard Python automation libraries often fail in DirectX/Vulkan games because they interact with the Windows API at a high level (Virtual Keys), whereas games often read "Raw Input" or "Scan Codes" directly from the hardware driver stack. To bypass this, we utilize the ctypes library to interface directly with user32.dll and SendInput.38
+Table 1: Input Action Discretization Strategy
+Action Index
+	Action Name
+	Low-Level Execution Logic
+	Mouse Delta (dx, dy)
+	Duration (ms)
+	0
+	Neutral / Reset
+	Center mouse relative to screen
+	(0, 0)
+	100
+	1
+	High Guard Left
+	Slow drift to top-left
+	(-50, -50)
+	200
+	2
+	High Guard Right
+	Slow drift to top-right
+	(50, -50)
+	200
+	3
+	Low Guard Left
+	Slow drift to bottom-left
+	(-50, 50)
+	200
+	4
+	Low Guard Right
+	Slow drift to bottom-right
+	(50, 50)
+	200
+	5
+	Overhead Strike
+	Rapid downward acceleration
+	(0, +400)
+	50
+	6
+	Horizontal Slash L
+	Rapid Left-to-Right sweep
+	(+400, 0)
+	50
+	7
+	Horizontal Slash R
+	Rapid Right-to-Left sweep
+	(-400, 0)
+	50
+	8
+	Thrust
+	Hold ALT + Forward Drift + Click
+	(0, -100)
+	150
+	
+
+5.2 Implementing Relative Mouse Movement
+
+
+In Half Sword, the mouse controls the weapon's position relative to the camera center. Therefore, all inputs must be relative.
+Technical Implementation Details:
+We define the MOUSEINPUT structure in Python to match the Windows C++ API.
+
+
+Python
+
+
+
+
+import ctypes
+
+# Define C-Structs for Windows API
+class MOUSEINPUT(ctypes.Structure):
+   _fields_ =
+
+class INPUT(ctypes.Structure):
+   _fields_ = [("type", ctypes.c_ulong),
+               ("ii", Input_I)] # Union wrapper
+
+# Constants
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_ABSOLUTE = 0x8000 # Do NOT use this for gameplay
+
+Using MOUSEEVENTF_MOVE without ABSOLUTE ensures the game engine interprets the signal as a physical mouse displacement ($dx, dy$).41
+
+
+5.3 Developing the "Gesture Engine"
+
+
+A single DQN action (e.g., "Horizontal Slash") cannot be a single SendInput call. Physics requires smooth interpolation. If the mouse jumps 400 pixels in 0ms, the physics engine might glitch or clamp the velocity.
+* Micro-Steps: The input adapter must break a "Slash" command into a sequence of micro-movements.
+   * Example: A slash of +400 pixels should be executed as 4 events of +100 pixels spaced 10ms apart. This creates a "drag" effect that the physics engine interprets as a high-momentum swing.
+   * Cursor Implementation: Ask Cursor to generate a helper function perform_smooth_gesture(total_dx, total_dy, duration_ms) that calculates the number of steps required based on the target duration and sends the batched inputs.23
+________________
+
+
+6. Technical Implementation: Perception and Reward System
+
+
+The agent must "see" the game to learn. This involves capturing the screen, processing the visual data, and extracting a reward signal.
+
+
+6.1 High-Performance Screen Capture
+
+
+Latency is the enemy of reinforcement learning in action games. If the agent acts on a frame that is 100ms old, it will miss blocks and strikes.
+* Library Selection: mss (Multi-Screen Shot) is recommended over PIL or pyautogui for its speed on Windows. Alternatively, d3dshot can capture directly from the GPU buffer, minimizing CPU overhead.
+* Preprocessing: Half Sword is visually noisy (textures, lighting).
+   * Grayscale Conversion: Essential to reduce dimensionality.
+   * Resizing: Downscale to 84x84 or 128x128 pixels.
+   * Frame Stacking: Stack the last 4 frames into a single observation channel ($4 \times 84 \times 84$). This allows the Convolutional Neural Network (CNN) to infer velocity and acceleration of the weapon and enemy limbs.3
+
+
+6.2 Optical Character Recognition (OCR) for Scoring
+
+
+Since we cannot hook into the memory to read the "Score" variable, we must read it from the screen.
+* Target: The "Abyss" mode score counter or kill count.
+* Tooling: Tesseract OCR (via pytesseract) or easyOCR.
+* Optimization: Running OCR on every frame is too computationally expensive (10-15 FPS drop).
+   * Solution: Run OCR only every 30-60 frames (0.5s to 1s intervals). The score does not change rapidly.
+   * Region of Interest (ROI): Hardcode the crop coordinates for the score UI element (e.g., img[50:100, 1700:1800]) to minimize the processing area.
+   * Image Processing: Apply a thresholding filter (binary black/white) using OpenCV (cv2.threshold) before passing to Tesseract to improve accuracy on stylized game fonts.43
+Cursor Implementation Prompt:
+"Create a class RewardTracker. Use mss to capture a specific screen region defined by (top, left, width, height). Use cv2 to convert to grayscale and threshold the image. Use pytesseract to extract integer values. Handle cases where OCR fails or returns non-numeric garbage. Return the difference between the current score and the previous score."
+
+
+6.3 Detecting Terminal States (Game Over)
+
+
+The RL loop needs to know when the episode ends.
+* Visual Cue: Half Sword displays a specific screen upon death ("You Died", "Eliminated", or a fade to red/black).29
+* Detection Method: Color Histogram analysis is faster than OCR. Check if the average "Red" channel intensity of the screen exceeds a certain threshold (indicating the "bloody screen" effect) or if the screen becomes purely black (fade out).47
+* Implementation: if np.mean(screen_region) < 10: done = True.
+________________
+
+
+7. The Reinforcement Learning Loop and Training Methodology
+
+
+With the environment (halfsword_env.py) and agent (model.py) refactored, the training loop coordinates the learning process.
+
+
+7.1 Deep Q-Network Configuration
+
+
+We utilize the DQN architecture inherent in ScrimBrain but tuned for the new environment.
+* Network Architecture:
+   * Input: $4 \times 84 \times 84$ (Stacked Grayscale Frames).
+   * Backbone: Nature CNN (3 Convolutional Layers) or IMPALA ResNet (for deeper feature extraction).
+   * Head: Dueling DQN (splitting Value and Advantage streams) enhances learning stability in environments where many actions have similar values (e.g., slight variations in guard position).14
+   * Output: Discrete vector of size $N$ (corresponding to our Macro-Action table).
+
+
+7.2 Training Curriculum
+
+
+Training an agent from scratch in a complex physics simulator is difficult. A curriculum approach is required.
+1. Stage 1: The Dummy (Static Target):
+   * Load the agent into the training arena with a static dummy.
+   * Reward: +1 for any "hit" detected (score increase).
+   * Goal: Learn that "Mouse Movement + Click" = "Score".
+2. Stage 2: The Peasant (Weak AI):
+   * Fight against the easiest AI bot.
+   * Goal: Learn spacing and basic guarding.
+3. Stage 3: The Abyss (Survival):
+   * Full deployment in Abyss mode.
+   * Reward: Composite of Score + Survival Time.
+
+
+7.3 Hyperparameter Tuning
+
+
+* Frame Skip: In physics games, 60 decisions per second is unnecessary and jittery. Implement a "Frame Skip" of 4. The agent selects an action, and that action is repeated for 4 frames (approx. 66ms). This stabilizes the physics input.3
+* Exploration (Epsilon): Start with $\epsilon = 1.0$ and decay slowly over 1,000,000 frames. Half Sword's physics are chaotic; the agent needs significant random exploration to discover that "flailing" can sometimes be effective.
+________________
+
+
+8. Safety, Anti-Cheat Compliance, and Deployment
+
+
+Critical Warning: Half Sword utilizes Easy Anti-Cheat (EAC).48 This introduces significant operational risks.
+
+
+8.1 The Risk of Bans
+
+
+EAC monitors the system for:
+* Synthetic Input: SendInput commands that lack hardware flags.
+* Overlay Injection: Reading the screen memory or injecting code.
+* Process Hooking: Attempting to read memory directly.
+
+
+8.2 Safe Development Protocol
+
+
+To conduct this research without violating Terms of Service or incurring hardware bans:
+1. Offline Environment: Development MUST be conducted in the "Demo" or "Playtest" versions of the game, or specifically in offline mode where EAC is not active. Using this agent in online multiplayer is a violation of the EULA and is strictly outside the scope of research.8
+2. Input Obfuscation (Hardware Approach): For a truly undetectable implementation (e.g., for non-intrusive testing), rely on hardware-level input simulation.
+   * Method: The Python script runs on a separate laptop (Observation PC). It captures the gaming PC's screen via a Capture Card. It sends commands to an Arduino/Raspberry Pi Pico acting as a USB HID Mouse plugged into the gaming PC.
+   * Result: The gaming PC sees only "legitimate" USB hardware signals, bypassing software heuristics entirely. ScrimBrain supports this "Dual PC" setup out of the box.3
+3. Process Isolation: Ensure the Python environment does not attempt to attach a debugger to the HalfSword-Win64-Shipping.exe process.
+________________
+
+
+9. Conclusion
+
+
+The implementation of a ScrimBrain-derived agent for Half Sword represents a sophisticated exercise in Cross-Domain Reinforcement Learning. By leveraging Cursor AI to automate the refactoring of the codebase, developers can focus on the high-level challenges: solving the continuous control problem via action discretization, designing a visual reward function using OCR, and tuning the physics interactions of the input layer.
+This report demonstrates that while the transition from a discrete shooter (Fortnite) to a physics brawler (Half Sword) requires significant re-engineering of the Action and Reward modules, the visual perception backbone (CNNs) remains universally applicable. The resulting system—a "Gesture-Based Visual Agent"—paves the way for advanced automated playtesting capable of uncovering physics bugs and balancing issues that scripted bots would never encounter.
+
+
+Appendix A: Detailed Cursor AI Refactoring Prompts
+
+
+To assist in the replication of this framework, the following prompts are designed for Cursor’s "Composer" mode:
+Prompt 1 (Environment Porting):
+"Analyze fortnite_env.py. Create a new file halfsword_env.py inheriting from gym.Env. Keep the screen capture loop but replace the step method. In step, instead of building logic, implement a call to self.action_controller.perform(action). Define the observation space as Box(0, 255, (4, 84, 84)) and action space as Discrete(9)."
+Prompt 2 (Input Wrapper):
+"Create a input_utils.py module. Implement a class DirectInput using ctypes. It needs methods for PressKey, ReleaseKey, and MoveMouseRelative. Define the scan codes for W, A, S, D, Q, E, Alt, and Space based on the DirectInput scan code table. Ensure MoveMouseRelative uses MOUSEEVENTF_MOVE."
+Prompt 3 (Vision Debugging):
+"Create a script debug_vision.py. It should capture the screen using the logic in halfsword_env.py, apply the grayscale and resizing preprocessing, and display the stream in a cv2 window at 60FPS. Draw a red rectangle around the coordinates used for the Score OCR to verify alignment."
+________________
+
+
+Appendix B: Troubleshooting Common Implementation Issues
+
+
+Issue
+	Symptom
+	Root Cause
+	Solution
+	Input Glitching
+	Camera spins wildly or looks at floor.
+	Using Absolute coordinates instead of Relative.
+	Ensure MOUSEEVENTF_ABSOLUTE flag is OFF. Use MOUSEEVENTF_MOVE only.
+	Sparse Rewards
+	Agent spins in circles doing nothing.
+	Agent is not hitting enemies; reward signal is 0.
+	Implement "Curriculum Learning". Start with a stationary target that guarantees hits to prime the Q-network.
+	OCR Failure
+	Reward graph is flat or erratic.
+	Tesseract cannot read the stylized font.
+	Preprocess the image with cv2.threshold + cv2.dilate to thicken text. Switch to "Template Matching" for digits 0-9 if OCR remains unreliable.
+	Ragdolling
+	Agent falls over constantly.
+	Physics instability from rapid inputs.
+	Increase action_duration in the macro library. Add a "Stand Up" macro (spamming Space/Crouch).
+	Works cited
+1. wkwan/ScrimBrain: Reinforcement Learning in Fortnite With ... - GitHub, accessed November 23, 2025, https://github.com/wkwan/scrimbrain
+2. Will Kwan wkwan - GitHub, accessed November 23, 2025, https://github.com/wkwan
+3. wkwan/ScrimBrain: Reinforcement Learning in Fortnite With Real-Time Screen Capture and Windows Input Simulation - GitHub, accessed November 23, 2025, https://github.com/wkwan/ScrimBrain
+4. What are the FULL game controls? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1k9ebol/what_are_the_full_game_controls/
+5. how exactly does the fighting mechanics work? :: Half Sword General Discussions, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/4629233123492645924/
+6. Cursor Rules, MCP, and Code Agents | by Noa Lubin | Data Science Collective, accessed November 23, 2025, https://medium.com/data-science-collective/cursor-rules-mcp-and-code-agents-b1e21f793fac
+7. Cursor: The best way to code with AI, accessed November 23, 2025, https://cursor.com/
+8. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 23, 2025, https://github.com/massclown/HalfSwordTrainerMod
+9. How to MOD Half Sword (and Make CUSTOM LOADOUTS) - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=uV0kcTDH_KU
+10. Sword Control | 0.5 Half Sword Guide - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=YhriWvhOkgo
+11. The Ultimate Guide To Half Sword Mechanics! (New Players) - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=7BSxBuaaa64
+12. Advanced Mouse Controls - Tutorial - Half Sword Playtest - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=3yCr8JNgbUM
+13. Mouse movement tips?? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1i9goml/mouse_movement_tips/
+14. DDPG: DQN Re-engineered for Continuous Action Spaces - Shivang Shrivastav - Medium, accessed November 23, 2025, https://shivang-ahd.medium.com/ddpg-dqn-re-engineered-for-continuous-action-spaces-3e536ffd287b
+15. Action Space Shaping in Deep Reinforcement Learning - arXiv, accessed November 23, 2025, https://arxiv.org/pdf/2004.00980
+16. Comparative Study of Reinforcement Learning Algorithms: Deep Q-Networks, Deep Deterministic Policy Gradients and Proximal Policy Optimization - Washington University Open Scholarship, accessed November 23, 2025, https://openscholarship.wustl.edu/cgi/viewcontent.cgi?article=1017&context=eseundergraduate_research
+17. Non-standard healthbar for enemies? : r/gamedesign - Reddit, accessed November 23, 2025, https://www.reddit.com/r/gamedesign/comments/137dum3/nonstandard_healthbar_for_enemies/
+18. How does damage work? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1g9ibxr/how_does_damage_work/
+19. Screenshots collection : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1oyi5oh/screenshots_collection/
+20. Highest score reached? :: Half Sword General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/6929437211297909038/
+21. Half Sword Settings | Explanation Requested - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/4754201033330644994/
+22. Struggling with playtest : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1fzeu4o/struggling_with_playtest/
+23. Simulate Mouse Events in Python - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=2BXr9U6ZL8Y
+24. Half Sword Playtest - Tutorial - Passive Parry - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=fHvMwUwkpAI
+25. Half Sword Playtest - Tutorial - Guide For Parrying - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=sz0o8Ewks-Y
+26. Does this game essentially auto-block as long as you're holding down the mouse in the general direction of an attack? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1h5ebxs/does_this_game_essentially_autoblock_as_long_as/
+27. Please add a toggle for "auto-blocking" : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1lcltbw/please_add_a_toggle_for_autoblocking/
+28. Game trying to auto-block for me and involuntarily changing stance : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1fwa74o/game_trying_to_autoblock_for_me_and_involuntarily/
+29. Exempler Candidate Work - H447 - Unit F454 Computing Project C - OCR, accessed November 23, 2025, https://www.ocr.org.uk/Images/269252-f454-exemplar-candidate-work-project-c-mid-band-.pdf
+30. Plus MORE GAMES, GRAPHIC TUTORIALS AND DOZEN SOFTWARE REVIEWS - Color Computer Archive, accessed November 23, 2025, https://colorcomputerarchive.com/repo/Documents/Magazines/Rainbow%2C%20The%20%28OCR%29/The%20Rainbow%20Vol.%2004%20No.%2001%20-%20August%201984.pdf
+31. Do opponents have more health than the player? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1kc6yhh/do_opponents_have_more_health_than_the_player/
+32. How To Use Cursor AI: A Complete Guide With Practical Example - Codecademy, accessed November 23, 2025, https://www.codecademy.com/article/how-to-use-cursor-ai-a-complete-guide-with-practical-examples
+33. The Ultimate Introduction to Cursor for Developers - Builder.io, accessed November 23, 2025, https://www.builder.io/blog/cursor-ai-for-developers
+34. Cursor 2.0: A Complete Guide With Python Project - DataCamp, accessed November 23, 2025, https://www.datacamp.com/tutorial/cursor-2-0-complete-guide
+35. Cursor Composer: A Practical Guide with Best Practices | Igor's Techno Club, accessed November 23, 2025, https://igorstechnoclub.com/cursor-composer-a-practical-guide-with-best-practices/
+36. How to use Cursor AI Composer in 5 minutes - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=Tm_2RZm8JB8
+37. AI-Powered Code Refactoring: A Case Study Using Cursor with GPT-4o and Claude 3.7 Sonnet - DEV Community, accessed November 23, 2025, https://dev.to/denis_bratchikov/ai-powered-code-refactoring-a-case-study-using-cursor-with-gpt-4o-and-claude-37-sonnet-3hh
+38. Simulate Mouse Clicks on Python - linux - Stack Overflow, accessed November 23, 2025, https://stackoverflow.com/questions/3545230/simulate-mouse-clicks-on-python
+39. Python DirectInput Mouse Relative Moving act not as expected - Stack Overflow, accessed November 23, 2025, https://stackoverflow.com/questions/50601200/python-directinput-mouse-relative-moving-act-not-as-expected
+40. Python Mouse Movement Emulation in Games - Stack Overflow, accessed November 23, 2025, https://stackoverflow.com/questions/27674827/python-mouse-movement-emulation-in-games
+41. python - relative mouse position not working properly in ctypes - Stack Overflow, accessed November 23, 2025, https://stackoverflow.com/questions/71196086/relative-mouse-position-not-working-properly-in-ctypes
+42. Python | Relative Mouse Movement and Move towards Target - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=YPGkBGSRnac
+43. Ultimate guide to Python Tesseract - Nutrient SDK, accessed November 23, 2025, https://www.nutrient.io/blog/tesseract-python-guide/
+44. Python OCR Tutorial: Tesseract, Pytesseract, and OpenCV - Nanonets, accessed November 23, 2025, https://nanonets.com/blog/ocr-with-tesseract/
+45. Tesseract Page Segmentation Modes (PSMs) Explained: How to Improve Your OCR Accuracy - PyImageSearch, accessed November 23, 2025, https://pyimagesearch.com/2021/11/15/tesseract-page-segmentation-modes-psms-explained-how-to-improve-your-ocr-accuracy/
+46. Still impossible to lose :: Mount & Blade II: Bannerlord [EN] General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/261550/discussions/0/4139439021823589026/?l=spanish&ctp=2
+47. The demo update introduced an automatic loss counter if you get knocked down and don't stand up quick enough. I'm not a fan of this. : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1jp090j/the_demo_update_introduced_an_automatic_loss/
+48. Easy Anti-Cheat, accessed November 23, 2025, https://www.easy.ac/
+49. BattlEye or Easy Anti Cheat? : r/gamedev - Reddit, accessed November 23, 2025, https://www.reddit.com/r/gamedev/comments/1bs5lw9/battleye_or_easy_anti_cheat/

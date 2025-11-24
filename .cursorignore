@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Build Artifacts
+dist/
+build/
+.eggs/
+*.egg-info/
+.eggs/
+*.so
+*.dylib
+*.dll
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.venv311/
+
+# Data & Logs
+*.log
+*.csv
+*.jsonl
+data/
+logs/
+*.pt
+*.pth
+models/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Archive & Old Code
+archive/
+old_code/
+
+# Documentation (keep Memory Bank!)
+docs/archive/
+
+# Test Output
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary Files
+*.tmp
+*.temp
+nul
+*.bak
+
+# Large Binary Files
+*.pt
+*.pth
+*.onnx
+*.pb
+yolov8n.pt
+
+# OS Files
+Thumbs.db
+.DS_Store
+

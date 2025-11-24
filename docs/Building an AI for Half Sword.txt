@@ -1,0 +1,464 @@
+﻿Autonomous Agent Architecture for Physics-Based Combat in Half Sword: A Hybrid Imitation-Reinforcement Learning Framework
+
+
+
+
+1. Executive Summary
+
+
+The pursuit of autonomous agents capable of navigating complex, high-fidelity physics simulations represents one of the frontiers of modern artificial intelligence. This report details the architectural design, theoretical underpinnings, and implementation strategy for an autonomous Artificial Intelligence (AI) system tailored for the video game Half Sword. Unlike traditional fighting games that rely on discrete inputs and pre-baked animations, Half Sword utilizes an active ragdoll physics system where control inputs directly manipulate the angular momentum and positioning of the character’s limbs.1 This shifts the problem domain from simple state-action mapping to continuous robotic control, necessitating a sophisticated approach blending Computer Vision, Memory Introspection, Imitation Learning (IL), and Reinforcement Learning (RL).
+To satisfy the core objective—creating an agent that learns from human demonstration and subsequently refines its behavior via a reward system—we propose a multi-layered "Half-Bot" architecture. This system leverages UE4SS (Unreal Engine 4/5 Scripting System) for direct memory access to extract ground-truth state data (health, stamina, limb integrity) 3, DXCam for high-frequency visual perception 5, and Stable Baselines 3 for the implementation of Generative Adversarial Imitation Learning (GAIL) and Proximal Policy Optimization (PPO).6
+The development strategy is specifically optimized for execution by AI coding assistants (specifically Cursor AI). By modularizing the system into distinct components—Perception, Actuation, Environment Wrapping, and Policy Training—we minimize context loss and maximize the efficacy of automated code generation. This report serves as the definitive technical specification for building this system, analyzing the nuances of HEMA (Historical European Martial Arts) physics, the complexities of active ragdoll control, and the specific memory hooks required to construct a dense, shaping reward function that encourages "honorable" and effective combat.
+
+
+2. The Physics of Half Sword: A Control Theory Perspective
+
+
+To engineer an effective intelligence, one must first deeply understand the environment it inhabits. Half Sword is not merely a game; it is a physics simulation that attempts to model the biomechanics of medieval combat. This distinction is critical because it dictates the nature of the Action Space and the Observation Space required for the Reinforcement Learning agent.
+
+
+2.1 The Active Ragdoll Problem
+
+
+In traditional animation systems (kinematic animation), a "punch" command plays a specific file where the fist moves from point A to point B regardless of the environment. In Half Sword, the character is an "active ragdoll"—a system of rigid bodies connected by joints with motorized constraints.1 When the player moves the mouse, they are not playing an animation; they are applying torque to the virtual shoulders and hips to drive the hand toward a target vector.
+This introduces the "Control Problem." If the agent applies too much force, the character’s center of mass shifts, causing them to trip. If the agent strikes an object (like an enemy shield), the physics engine calculates the recoil based on mass and velocity, potentially throwing the agent off balance.
+The implications for the AI are profound:
+* Continuous Action Space: The agent cannot output discrete "Attack" commands. It must output continuous values (floating point numbers) representing the desired velocity and direction of the hands.
+* State Dependance: The success of an action depends entirely on the current physical state (stance, momentum, balance). A swing that works while standing still may cause a fall if attempted while strafing.
+* Stochasticity: The physics interactions introduce noise. Two identical inputs might produce slightly different results due to micro-variations in collision geometry or frame timing.
+
+
+2.2 HEMA Mechanics and Strategic Implications
+
+
+The game is designed as a HEMA simulator, emphasizing spacing, leverage, and edge alignment over raw speed.1
+* Half-Swording: The mechanic of gripping the blade (RMB) to increase leverage for thrusting highlights the need for a "Mode Switch" in the AI's policy. The agent must learn when to sacrifice reach for control.2
+* Armor Physics: Damage is calculated based on penetration. A slash against plate armor is ineffective; the AI must learn to target gaps (underarms, visor) or use blunt force (maces).1 This implies the Reward Function cannot just be "Hit = Reward." It must be "Damaging Hit = Reward," requiring deep introspection into the game's damage logic via UE4SS.
+
+
+2.3 The "Cursor AI" Implementation Strategy
+
+
+Since Cursor AI is building this, we must define the problem in standard robotics terms. We are effectively asking Cursor to build a controller for a remote-operated robot (the in-game character).
+* The "Brain": A Neural Network (PPO/SAC).
+* The "Sensor": A fusion of Camera (DXCam) and Proprioception (UE4SS Memory Read).
+* The "Actuator": A Virtual Human Interface Device (PyDirectInput).
+This report breaks down each of these components to provide Cursor with the precise context needed to generate functional code.
+
+
+3. System Architecture: The Hybrid IRL-RL Pipeline
+
+
+The architecture is designed to be robust, modular, and scalable. It addresses the primary failure modes of RL in games: latency, sparse rewards, and exploration stagnation.
+
+
+3.1 High-Level Data Flow
+
+
+The system operates in a closed feedback loop running at approximately 60 Hz (frames per second).
+Table 1: System Component Interaction Matrix
+Component
+	Role
+	Input
+	Output
+	Latency Budget
+	Game Process
+	The Environment
+	Physics/Input
+	Visuals/Memory
+	< 16ms (60 FPS)
+	UE4SS Mod
+	Telemetry
+	Memory State
+	TCP Packet
+	< 2ms
+	Visual Encoder
+	Perception
+	Screen Buffer
+	Latent Vector
+	< 10ms (GPU)
+	Policy Network
+	Decision Making
+	State Vector
+	Action Vector
+	< 5ms
+	Virtual HID
+	Actuation
+	Action Vector
+	DirectX Input
+	< 1ms
+	The data flows as follows:
+1. T=0: The game renders a frame and updates physics.
+2. T+1ms: The UE4SS Lua Script reads the Health, Stamina, and EnemyLocation from memory and sends a JSON/String packet to localhost port 9999.
+3. T+2ms: The Python Environment Wrapper receives the packet. Simultaneously, DXCam grabs the latest frame from the GPU buffer.
+4. T+12ms: The Visual Encoder (CNN) processes the image, and the Policy Network processes the combined state (Image + Memory Stats).
+5. T+15ms: The Network outputs an action vector (Mouse X, Mouse Y, WASD).
+6. T+16ms: PyDirectInput injects the mouse movement into the OS input stream.
+7. T+17ms: The game reads the input for the next physics step.
+This tight loop ensures the AI feels "responsive." If latency exceeds 50-100ms, the agent effectively fights "in the past," leading to oscillation and failure in physics tasks.
+
+
+3.2 Why Hybrid Imitation-Reinforcement Learning?
+
+
+The user explicitly requested an AI that "learns from my actions." This is the correct approach for Half Sword.
+* The Exploration Problem: In a complex physics game, a random policy (the starting point of pure RL) looks like a seizure. The agent will fall over, drop the sword, or get stuck in geometry. It might take millions of episodes to accidentally discover that "moving mouse forward" equals "thrust."
+* Imitation Learning (IL): By recording the user playing competently, we provide the agent with valid trajectories. We use Behavioral Cloning (BC) to initialize the neural network weights. This gives the agent a "common sense" understanding of movement and combat before it ever attempts to optimize a reward.
+* Reinforcement Learning (RL): IL alone is brittle; if the agent encounters a situation the human never demonstrated, it fails (Distribution Shift). RL allows the agent to refine this behavior, adapt to new scenarios, and eventually surpass the human teacher by optimizing the reward function.
+
+
+4. Perception Layer: Computer Vision & State Extraction
+
+
+The Perception Layer is the "eyes" and "inner ear" of the agent. We utilize a dual-modality approach: Visual Perception for spatial awareness and Memory Introspection for physiological state.
+
+
+4.1 Visual Capture: The DXCam Solution
+
+
+To process gameplay, we need high-speed access to the video feed. Traditional screen capture methods in Python (like PIL.ImageGrab or pyautogui.screenshot) rely on the GDI (Graphics Device Interface) or older BitBlt operations, which are CPU-bound and slow, often capping at 15-30 FPS.8
+Why DXCam?
+DXCam is a Python wrapper for the Windows Desktop Duplication API (DDA).5 This API operates at the GPU level.
+* Zero-Copy: Ideally, DDA keeps the image in GPU memory. While we eventually need it in system RAM for the PyTorch tensor, the transfer is significantly faster than GDI.
+* Frame Rate: DXCam can capture 1080p screens at over 120 Hz, far exceeding our 60 Hz requirement.
+* Implementation: We will instruct Cursor to implement a DXCam instance that crops the screen to the center 800x800 pixels (where the combat happens) and resizes it to 84x84 pixels for the Neural Network.
+Visual Processing Architecture:
+We will use a standard Convolutional Neural Network (CNN) architecture, such as the NatureCNN (from the original Atari DQN paper) or Impala, provided by Stable Baselines 3.
+* Input: $84 \times 84 \times 3$ (RGB Image). We use RGB instead of Grayscale because blood (red) is a critical visual indicator of damage in Half Sword 10, and metallic glints distinguish armor types.
+* Frame Stacking: To perceive motion (velocity/acceleration), we stack the last 4 frames. The input tensor becomes $84 \times 84 \times 12$.
+
+
+4.2 Memory Introspection: The UE4SS Interface
+
+
+Visuals are insufficient for a robust Reward System. The "Gore" system in Half Sword is detailed but messy; visually determining if an enemy has 10% HP or 50% HP is difficult for a CNN. We need ground truth.
+The Tool: UE4SS (Unreal Engine 4/5 Scripting System)
+UE4SS is a powerful modding tool that injects itself into the Unreal Engine process, allowing the execution of Lua scripts that interact with the internal UObject architecture.4
+
+
+4.2.1 Finding the Data
+
+
+The Half Sword Trainer Mod 3 proves that BP_Character (or a similar Blueprint class) holds the relevant variables.
+* Health: likely a float property.
+* Stamina: likely a float property.
+* IsDead: boolean or check if Health <= 0.
+* Body Part Integrity: The mod mentions "body density" and "bone snapping".10 These are likely stored in a HealthComponent or DamageHandler sub-object attached to the Character Actor.
+
+
+4.2.2 The Lua Telemetry Script
+
+
+We must create a Lua script (main.lua) to act as the server. This script will:
+1. Hook into the Game Loop: Use RegisterHook("/Script/Engine.PlayerController:PlayerTick",...) to execute code every frame.11
+2. Locate Actors: Use UEHelpers:GetPlayerController().Pawn to find the player. Use FindAllOf("BP_Character_C") to find enemies.12
+3. Serialize Data: Construct a string containing the relevant data.
+4. Transmit: Send this string over a local TCP socket.
+Draft Code Structure for Cursor:
+You will direct Cursor to write a Lua script that performs the following logic:
+
+
+Lua
+
+
+
+
+-- HalfSwordTelemetry.lua
+-- Requires: socket (LuaSocket)
+
+local socket = require("socket")
+local tcp = assert(socket.tcp())
+local connected = false
+
+function Connect()
+   -- Try to connect to the Python RL agent
+   local success, err = tcp:connect("127.0.0.1", 9999)
+   if success then 
+       tcp:setoption("tcp-nodelay", true)
+       connected = true
+       print("Connected to RL Agent")
+   end
+end
+
+-- Helper to get property safely
+function GetFloat(obj, propName)
+   if not obj:IsValid() then return 0.0 end
+   return obj:GetPropertyValue(propName)
+end
+
+RegisterHook("/Script/Engine.PlayerController:PlayerTick", function()
+   if not connected then Connect() return end
+   
+   local PC = UEHelpers:GetPlayerController()
+   local MyPawn = PC.Pawn
+   local EnemyPawn = nil -- Logic to select nearest enemy
+   
+   if MyPawn:IsValid() then
+       local health = GetFloat(MyPawn, "Health")
+       local stamina = GetFloat(MyPawn, "Stamina")
+       
+       -- Send Data: "HEALTH|STAMINA|..."
+       local payload = string.format("%.2f|%.2f\n", health, stamina)
+       tcp:send(payload)
+   end
+end)
+
+Constraint Checklist:
+* Blocking vs. Non-Blocking: The Lua socket send must be non-blocking or extremely fast to avoid stuttering the game.
+* Variable Names: The specific variable names (Health, Stamina) must be verified. The Trainer Mod source code 13 is the Rosetta Stone here. If the mod toggles "Invulnerability," it likely sets a boolean bIsInvulnerable or locks Health to Max. We can infer the names from these operations.
+
+
+5. Actuation Layer: Interfacing with the Simulation
+
+
+The Actuation Layer is responsible for translating the abstract decisions of the neural network into concrete inputs that the Windows OS and the game engine recognize.
+
+
+5.1 The Input Landscape of 3D Games
+
+
+In a typical desktop application, the mouse cursor has an absolute 2D position $(x, y)$. However, 3D First-Person games (including Half Sword) typically ignore the cursor position. Instead, they read Raw Input (deltas) directly from the hardware driver. This allows for infinite rotation without the cursor hitting the edge of the screen.
+* The Problem with pyautogui: It simulates cursor movement. In Half Sword, this often results in the game ignoring the input or behaving erratically because the game centers the cursor every frame.14
+* The Solution: PyDirectInput: This library sends SendInput commands with the MOUSEEVENTF_MOVE flag, which DirectX interprets correctly as physical mouse movement.16
+
+
+5.2 Action Space Definition
+
+
+For Reinforcement Learning, we must define the "Action Space"—the set of all possible moves.
+* Type: Continuous (Box).
+* Dimensions: 4
+   1. Mouse X (-1.0 to 1.0): Controls horizontal swing / turning.
+   2. Mouse Y (-1.0 to 1.0): Controls vertical swing / thrust extension.
+   3. Move X (-1.0 to 1.0): Strafe Left/Right (mapped to A/D keys).
+   4. Move Y (-1.0 to 1.0): Move Forward/Back (mapped to W/S keys).
+Mapping Logic:
+The raw output of the neural network is a float between -1 and 1. We must scale this.
+* Sensitivity Scalar ($S$): A hyperparameter (e.g., $S=50$).
+   * $DeltaX = Output_X \times S$
+   * $DeltaY = Output_Y \times S$
+* Thresholding for Keys:
+   * If $MoveX > 0.3 \rightarrow$ Hold 'D'.
+   * If $MoveX < -0.3 \rightarrow$ Hold 'A'.
+   * Else $\rightarrow$ Release both.
+Handling "Half-Swording" (RMB):
+Since the user specifically mentioned "Half Sword" techniques, we should ideally add a 5th dimension for Stance Control.
+* Action 5 (Stance): If $> 0.5$, Hold RMB (Half-Sword Mode). This allows the agent to dynamically switch between long-range swings and close-range grappling/thrusting.
+
+
+6. The Learning Core: Imitation Learning
+
+
+This section details the implementation of the "learn from my actions" requirement. This is the bootstrapping phase.
+
+
+6.1 The Recording Infrastructure
+
+
+We need a robust data logger. This is a Python script that runs while the user plays.
+* Inputs:
+   * Visuals: DXCam captures frames.
+   * Telemetry: Listens on the TCP port for the UE4SS data (Health, Stamina).
+   * Controls: Uses pynput 18 to hook global mouse and keyboard events.
+* Synchronization: The script must sample all three sources at a fixed rate (e.g., 60Hz). Using a while loop with a precision timer is preferred over event-driven callbacks for the main loop to ensure the "State" (Image) matches the "Action" (Mouse Move).
+* Data Structure:
+   * obs_images: Numpy array (N, 84, 84, 3)
+   * obs_stats: Numpy array (N, num_stats)
+   * actions: Numpy array (N, 5) (MouseX, MouseY, WASD, RMB)
+   * rewards: Derived from the telemetry (Damage Done).
+   * dones: Boolean flags for round end.
+Cursor Instruction: "Create a Recorder class that initializes DXCam and a TCP server. In a loop targeting 60FPS, capture the frame, read the latest socket packet, and read the accumulated mouse delta from a pynput listener. Store these in a list of dictionaries. On exit, save to a .npz file."
+
+
+6.2 Behavioral Cloning (BC)
+
+
+Behavioral Cloning treats the recorded data as a supervised learning dataset.
+* Input: Game State (Image + Stats).
+* Label: The Action the user took.
+* Loss Function: Mean Squared Error (MSE). The network minimizes the difference between its predicted action and the user's actual action.
+Limitations & GAIL:
+BC suffers from "Covariate Shift." If the agent drifts slightly off the path the user took (e.g., stumbling), it finds itself in a state it has never seen, panics, and fails.
+To address this, we use Generative Adversarial Imitation Learning (GAIL).19
+* The Discriminator: A separate neural network that tries to guess: "Is this motion from the Human or the Agent?"
+* The Generator (Agent): Tries to move in a way that tricks the Discriminator.
+* Benefit: This forces the agent to learn the distribution of human behavior (e.g., "Always keep the sword point towards the enemy") rather than just memorizing specific pixel-to-mouse mappings.
+Integration with Stable Baselines 3:
+The imitation library (compatible with SB3) provides a ready-to-use GAIL implementation.
+* Loader: We need to write a custom Trajectory loader that reads our .npz files and converts them into the format imitation expects.
+
+
+7. The Learning Core: Reinforcement Learning & Reward Shaping
+
+
+Once the agent has "cloned" the user's behavior, it enters the "Self-Improvement" phase (Reinforcement Learning). Here, it stops trying to mimic the user and starts trying to maximize the Reward Function.
+
+
+7.1 The Reward Hypothesis for Half Sword
+
+
+The user asked for a "reward system." In physics-based combat, the definition of "Good" is complex.
+Table 2: Reward Function Components
+
+
+Component
+	Weight (w)
+	Logic/Justification
+	Source
+	Damage Dealt
+	+10.0
+	The primary goal. Proportional to HP lost by enemy.
+	UE4SS (Enemy.Health)
+	Damage Taken
+	-5.0
+	Self-preservation. We weight this less than dealing damage to encourage aggression.
+	UE4SS (Player.Health)
+	Dismemberment
+	+20.0
+	Reward for high-quality, clean hits (HEMA principle).
+	UE4SS (Bone Integrity Flags) 21
+	Survival
+	+0.01/frame
+	Encourages staying alive (prevents suicide).
+	Loop Counter
+	Instability
+	-1.0/frame
+	Penalty if Head Z-height < 1.0m (Falling down). Encourages balance.
+	UE4SS (Pawn.Location.Z)
+	Spacing
+	+0.1/frame
+	Reward keeping optimal distance (weapon length dependent).
+	Distance Calculation
+	Energy
+	-0.001
+	Penalty for high Stamina usage. Discourages "helicoptering".
+	UE4SS (Stamina)
+	Equation:
+$$ R_t = w_d \cdot \Delta H_{enemy} - w_t \cdot \Delta H_{player} + w_k \cdot I_{kill} + w_s \cdot I_{survival} - P_{fall} $$
+
+
+7.2 Implementation Details
+
+
+This logic resides in the HalfSwordEnv.step() method in Python.
+* Calculating Deltas: The environment must store prev_enemy_health. In each step, delta = prev_enemy_health - current_enemy_health.
+* Handling Resets: When the match ends (Health <= 0), the environment must wait for the game to reload. The Trainer Mod 3 provides hotkeys (e.g., F5) to instantly respawn/reset. The reset() method should simulate pressing this key using pydirectinput.press('f5').
+
+
+7.3 Algorithm Selection: PPO
+
+
+We recommend Proximal Policy Optimization (PPO).22
+* Stability: PPO restricts how much the policy can change in one update (clipping). This prevents the agent from learning a "physics exploit" that breaks the simulation and then forgetting how to walk.
+* Continuous Support: PPO handles continuous action spaces natively.
+* Hyperparameters:
+   * ent_coef (Entropy Coefficient): Set high (0.01-0.05) initially to encourage exploration of the physics engine.
+   * learning_rate: Start low ($3 \times 10^{-4}$) to prevent divergence.
+   * n_steps: Long horizon (e.g., 2048) because combat creates long cause-and-effect chains (a stumble now leads to a hit 2 seconds later).
+
+
+8. Operationalizing with Cursor AI
+
+
+This section translates the architectural design into specific instructions you can give to Cursor AI.
+
+
+8.1 The Prompting Strategy
+
+
+Cursor AI is powerful but needs context. You cannot just say "Build the bot." You must build it layer by layer.
+Phase 1: The Telemetry Mod (Lua)
+* Prompt: "I am modding Half Sword using UE4SS. I need a Lua script that hooks into the PlayerController Tick. It should find the Player Pawn and the nearest Enemy Pawn. It needs to read their 'Health' and 'Stamina' float properties. Serialize this data into a string 'health|stamina' and send it to localhost:9999 using the socket library. Handle the case where the enemy is nil."
+* Validation: Cursor might hallucinate property names. You must verify them against the Trainer Mod source or UE4SS live viewer.
+Phase 2: The Recorder (Python)
+* Prompt: "Create a Python script for data collection. It needs dxcam for screen capture (resized to 84x84) and pynput for mouse/keyboard recording. It should also run a TCP server on port 9999 to receive game stats. Sync all three data sources (Video, Input, Stats) into a list of dictionaries at 60FPS. Save to .npz."
+Phase 3: The Gym Environment (Python)
+* Prompt: "Create a gymnasium.Env class named HalfSwordEnv. It should connect to the Lua socket client. Action space is Box(4) for MouseX, MouseY, MoveX, MoveY. Observation space is a Dict with 'image' (Box) and 'stats' (Box). The step function should use pydirectinput to apply actions, then read the socket for the new state and calculate reward based on damage dealt."
+Phase 4: The Training Script
+* Prompt: "Use stable_baselines3. Load my .npz data. Pre-train a PPO agent using the imitation library's Behavioral Cloning. Then, switch to online training using the HalfSwordEnv. Log rewards to TensorBoard."
+
+
+9. Conclusion
+
+
+The creation of an autonomous agent for Half Sword is a significant undertaking that merges reverse-engineering, systems programming, and advanced deep learning. By utilizing UE4SS to pierce the veil of the game engine, we transform a purely visual challenge into a data-rich reinforcement learning problem. The proposed Hybrid Imitation-RL approach ensures the agent begins with a baseline of human competence—essential for navigating the complex active ragdoll physics—before optimizing specifically for combat efficiency via the dense reward system.
+This architecture provides a complete roadmap. The user possesses the high-level vision; Cursor AI possesses the coding capability; and this report provides the necessary connective tissue—the memory addresses, the API choices, and the control theory—to bind them into a functional reality.
+
+
+10. Appendix: Technical Reference Data
+
+
+Table 3: Tool Compatibility & Selection Rationale
+Tool
+	Function
+	Selection Rationale
+	Alternatives Considered
+	Why Rejected
+	UE4SS
+	Mod Loader
+	Native support for Half Sword (UE5); Lua API allows logic injection.
+	Cheat Engine
+	Too slow; external pointers break easily; no logic injection.
+	DXCam
+	Vision
+	Direct GPU capture; >100 FPS; Low CPU overhead.
+	MSS / PyAutoGUI
+	CPU bound; high latency; frame tearing.
+	PyDirectInput
+	Input
+	Uses SendInput (DirectX compatible).
+	PyAutoGUI
+	Moves cursor (Windows API), ignored by Raw Input games.
+	SB3 (PPO)
+	RL Algo
+	Stable; standard implementation; supports Dict observations.
+	RLlib / Ray
+	Overkill for single-agent; steeper learning curve.
+	Socket (TCP)
+	IPC
+	Simple; robust; standard in Lua and Python.
+	Shared Memory (mmap)
+	Faster, but harder to implement in Lua without C++ bindings.
+	Table 4: UE4SS Hook Targets (Estimated)
+Logical Target
+	Likely UE Class / Property
+	Notes
+	Player Character
+	BP_Character_C or BP_Hero_C
+	The main Pawn class.
+	Health
+	Health (Float) or HealthComponent.CurrentHealth
+	Standard UE naming convention.
+	Stamina
+	Stamina (Float) or Energy
+	Often found in a StaminaComponent.
+	Controller
+	PlayerController
+	Accessed via UEHelpers:GetPlayerController().
+	Game Mode
+	BP_HalfSwordGameMode_C
+	Good place to hook for Restart/Spawn logic.
+	Note: Specific property names must be verified in-game using the UE4SS Live Property Viewer tool.
+Works cited
+1. How To Play Half-Sword (IMO) + Tips : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1i24tkm/how_to_play_halfsword_imo_tips/
+2. The first new PC game I played in 2025 is the medieval combat sim I've always wanted, and it's free on Steam | Windows Central, accessed November 22, 2025, https://www.windowscentral.com/gaming/the-first-new-game-i-played-in-2025-is-the-medieval-combat-sim-ive-always-wanted-and-its-free-to-try
+3. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 22, 2025, https://github.com/massclown/HalfSwordTrainerMod
+4. UE4SS-RE/RE-UE4SS: Injectable LUA scripting system, SDK generator, live property editor and other dumping utilities for UE4/5 games - GitHub, accessed November 22, 2025, https://github.com/UE4SS-RE/RE-UE4SS
+5. ra1nty/DXcam: A Python high-performance screen capture library for Windows using Desktop Duplication API - GitHub, accessed November 22, 2025, https://github.com/ra1nty/DXcam
+6. Stable-Baselines3 Docs - Reliable Reinforcement Learning Implementations — Stable Baselines3 2.7.1a3 documentation, accessed November 22, 2025, https://stable-baselines3.readthedocs.io/
+7. Imitation Learning — Stable Baselines3 2.7.1a3 documentation, accessed November 22, 2025, https://stable-baselines3.readthedocs.io/en/master/guide/imitation.html
+8. Python - Fast Screen Capture - Kyle Fu, accessed November 22, 2025, https://kylefu.me/2023/02/18/python-fast-screen-capture.html
+9. FAST Screenshots in Python for Computer Vision: mss vs. PIL vs. pyautogui - YouTube, accessed November 22, 2025, https://www.youtube.com/watch?v=SWgQNWf1ICA
+10. Half Sword Settings | Explanation Requested - Steam Community, accessed November 22, 2025, https://steamcommunity.com/app/2397300/discussions/0/4754201033330644994/
+11. Creating a Lua Mod - UE4SS Documentation, accessed November 22, 2025, https://docs.ue4ss.com/guides/creating-a-lua-mod.html
+12. How to iterate through all Blueprint Class Actors in level? - Unreal Engine Forums, accessed November 22, 2025, https://forums.unrealengine.com/t/how-to-iterate-through-all-blueprint-class-actors-in-level/277093
+13. Releases · massclown/HalfSwordTrainerMod - GitHub, accessed November 22, 2025, https://github.com/massclown/HalfSwordTrainerMod/releases
+14. pynput and pydirectinput mouse movements are innacurate unless pyautogui is imported, accessed November 22, 2025, https://stackoverflow.com/questions/65698046/pynput-and-pydirectinput-mouse-movements-are-innacurate-unless-pyautogui-is-impo
+15. Help using Python to move the mouse left and right in Overwatch - Reddit, accessed November 22, 2025, https://www.reddit.com/r/learnpython/comments/137ju03/help_using_python_to_move_the_mouse_left_and/
+16. pydirectinput -> pyautogui ? · Issue #9 · google/project-gameface - GitHub, accessed November 22, 2025, https://github.com/google/project-gameface/issues/9
+17. PyAutoGUI not working? Use DirectInput - YouTube, accessed November 22, 2025, https://www.youtube.com/watch?v=LFDGgFRqVIs
+18. Recording your mouse and keyboard with python - Andrew Wheeler, accessed November 22, 2025, https://andrewpwheeler.com/2025/10/10/recording-your-mouse-and-keyboard-with-python/
+19. Generative Adversarial Imitation Learning - Emergent Mind, accessed November 22, 2025, https://www.emergentmind.com/topics/generative-adversarial-imitation-learning-gail
+20. Generative Adversarial Imitation Learning - NIPS papers, accessed November 22, 2025, http://papers.neurips.cc/paper/6391-generative-adversarial-imitation-learning.pdf
+21. Gore is cool but the dismemberment is a bit much lol : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1gxgtmk/gore_is_cool_but_the_dismemberment_is_a_bit_much/
+22. Reinforcement Learning Tips and Tricks - Stable Baselines3 - Read the Docs, accessed November 22, 2025, https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html

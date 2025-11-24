@@ -1,0 +1,505 @@
+﻿Autonomous Agent Architecture for Physics-Based Medieval Combat: A Deep Learning Approach to Half Sword
+
+
+
+
+1. Introduction: The Challenge of Physics-Based Autonomy
+
+
+The advancement of Deep Reinforcement Learning (DRL) has fundamentally altered the landscape of game artificial intelligence, transitioning from finite state machines and behavior trees to learned policies capable of emergent complexity. While significant milestones have been achieved in discrete, arcade-style environments and perfect-information games like Chess or Go, the domain of physics-based simulation—specifically high-fidelity ragdoll combat—presents a frontier of distinct computational and mechanical challenges. This report provides an exhaustive technical analysis and a comprehensive architectural blueprint for developing a fully autonomous agent capable of mastering Half Sword, a physics-based medieval combat simulator.
+The core challenge in Half Sword lies in its continuous, high-dimensional state and action spaces. Unlike traditional fighting games where inputs correspond to pre-baked animations (e.g., "press 'A' to punch"), Half Sword utilizes active ragdoll physics where mouse movement directly maps to the velocity and trajectory of the weapon. This creates a control problem closer to robotic manipulation than standard video game AI. The agent must not only decide what to do but how to execute it in a continuous physical space, managing momentum, balance, and collision detection in real-time. Furthermore, the game's visual feedback mechanisms—ranging from subtle blood splatters to intrusive death screens—require a sophisticated perception pipeline that extends beyond simple pixel analysis.
+The existing codebase provided for review represents a nascent attempt at a discrete control system using the gymnasium interface and stable-baselines3. While it establishes a basic loop, it relies on discrete command mapping and rudimentary visual observation, which effectively lobotomizes the agent's ability to interact with the game's physics engine fluidly. To achieve true autonomy and high-level competency, the system requires a fundamental paradigm shift: the transition from discrete to continuous control spaces, the implementation of memory-based neural architectures to handle partial observability, and the rigorous application of Imitation Learning (IL) to bootstrap the learning process from human expertise.
+This report details the necessary engineering interventions, theoretically grounded in current DRL research and specifically tailored to the idiosyncrasies of the Half Sword engine as revealed by community documentation and technical analysis. We will explore the implementation of Recurrent Proximal Policy Optimization (RecurrentPPO), the necessity of Bezier-curve-based mouse smoothing for human-like actuation, and the development of a robust supervisor system to manage the game's volatile state and permanent death mechanics.
+
+
+2. Environmental Dynamics and Mechanics Analysis
+
+
+To engineer an effective agent, one must first rigorously quantify the environment it inhabits. Half Sword is not merely a game of hitboxes; it is a simulation of biomechanics and material interaction. The agent's success depends entirely on its ability to perceive and manipulate these underlying systems.
+
+
+2.1 The Physics of Ragdoll Combat
+
+
+The defining characteristic of Half Sword is its active ragdoll system. Character movement and weapon swings are not kinematic animations but are driven by forces applied to a physics rig. This implies that the "state" of the game includes not just the position of limbs, but their velocity, angular momentum, and the accumulated inertia of the weapon. A discrete agent pressing 'W' to move forward creates a digital, jerky force application that often results in the ragdoll stumbling or failing to generate sufficient impact force.
+Research into the game's controls highlights that successful combat requires "mouse control fundamentals" where the player must trace arcs with the mouse to generate swing velocity.1 The game's input interpretation is "fickle," responding differently based on the speed and smoothness of the mouse delta. A "limp dick swing" or a failure to commit to a mouse trajectory results in negligible damage, while a properly accelerated arc can cleave through armor. This necessitates an agent architecture that outputs continuous vector fields for mouse movement rather than discrete cardinal directions.
+Furthermore, the interaction between bodies is governed by "body density" and "bone snapping" parameters, which influence how easily a character is dismembered or knocked down.4 An autonomous agent must learn to exploit these physics parameters—for instance, targeting unarmored joints (necks) to bypass high body density armor 5, or using blunt force to trigger bone snapping mechanics on heavily armored opponents.
+
+
+2.2 Damage Feedback and Perception
+
+
+In a Reinforcement Learning context, the reward signal is the primary driver of behavior. In Half Sword, the most immediate proxy for reward is damage inflicted versus damage received. However, the game lacks a numerical health bar overlay, relying instead on diegetic visual cues.
+
+
+2.2.1 The "Red Vignette" and Pain States
+
+
+The primary indicator of player health is a "red vignette" or blood effect that encroaches from the edges of the screen as damage is sustained.6 This effect intensifies linearly with health loss, eventually obscuring peripheral vision. For a computer vision-based agent, this is a high-fidelity signal. By analyzing the saturation of red pixels ($HSV_{red}$) in the outer $20\%$ of the observation frame, we can construct a dense "pain" penalty.
+Conversely, damage to the opponent is signaled by blood splatter on their model and "squelching" audio cues.7 The visibility of blood on the enemy acts as a sparse positive reward. However, relying solely on visual blood is problematic due to occlusion—if the agent is close to the enemy, the blood might be off-screen. Therefore, the observation space must eventually integrate audio analysis to detect the distinct sound of a blade connecting with flesh versus armor, providing a "hit marker" signal even when visual confirmation is absent.8
+
+
+2.2.2 Limb Integrity and Locomotion
+
+
+The damage model is localized. Snippets indicate that leg injuries compromise movement speed and balance, often leading to the character tripping over their own feet or weapons. An agent trained without memory of its own body state might interpret this loss of control as a stochastic environment failure rather than a consequence of prior damage. This reinforces the need for a recurrent memory architecture (Section 5) that maintains an internal state estimate of "leg health" based on previous damage events.
+
+
+2.3 The "Death Screen" Obstruction
+
+
+A critical engineering challenge identified in the research is the game's handling of death. Upon a fatal blow, the screen cuts to black almost instantly 9, or displays a "You Died" overlay that obscures the physics aftermath.10 For an RL agent, this creates a "blinding" effect at the exact moment of the most significant negative reward. If the agent cannot see the state that led to death (e.g., the enemy winding up a hammer strike), it suffers from the "credit assignment problem"—it doesn't know what caused the negative outcome.
+Moreover, the "Gauntlet" mode introduces a permanent death mechanic where the save file tracks progress, and death resets the run to the beginning. Players have discovered that manipulating specific save files (e.g., SG Gauntlet Progress.sav in %localappdata%) is necessary to reset or "scum" the system.11 An autonomous agent intended for long-term training must have a supervisor system capable of detecting this "Game Over" state and programmatically intervening at the file system level to reset the environment, as the in-game menus may not offer a reliable restart loop.13
+
+
+2.4 Surrender Mechanics and AI Psychology
+
+
+A nuanced feature of Half Sword is the ability to force enemies to surrender. Research indicates that holding a weapon to an enemy's neck, or disarming them and acting aggressively, can trigger a surrender state.14 This is a critical tactical option. An agent that learns to force a surrender effectively "wins" the encounter without risking the variance of a prolonged duel.
+Additionally, the player character can surrender by holding the 'G' key.16 This mechanic prevents the "abyss" death (permanent loss) in some modes, treating it instead as a minor setback. An advanced agent should be capable of weighing the probability of victory against current health; if the "red vignette" is high and the enemy is healthy, the optimal policy might be to hold 'G' to preserve the run's meta-progress, rather than fighting to the death. This introduces a hierarchical decision-making requirement: a "survival" policy versus a "combat" policy.
+
+
+3. Environmental Wrapper Engineering
+
+
+The standard gymnasium environment wrapper provided in the initial script is insufficient for the complexity described above. We must engineer a robust HalfSwordEnv that handles high-fidelity perception, complex state management, and OS-level interactions.
+
+
+3.1 Advanced Observation Space Specification
+
+
+The current implementation uses a grayscale (1, 84, 84) observation box. This is inadequate for three reasons:
+1. Color Dependency: Grayscale eliminates the red channel, making the detection of the "red vignette" (damage) and blood splatter (success) computationally difficult or impossible.
+2. Resolution: A resolution of $84 \times 84$ is standard for Atari but too low for discerning subtle cues like the angle of an enemy's sword or the visual tell of a surrender animation.
+3. Frame Stacking Limits: While frame stacking provides velocity information, it increases memory usage linearly.
+Proposed Architecture:
+The observation space should be upgraded to a 3-channel RGB input with a minimum resolution of $128 \times 128$. This allows the Convolutional Neural Network (CNN) to utilize color filters in its early layers.
+Channel
+	Resolution
+	Purpose
+	Red
+	$128 \times 128$
+	Primary signal for Pain (vignette) and Success (blood).
+	Green
+	$128 \times 128$
+	Texture differentiation (armor vs. flesh).
+	Blue
+	$128 \times 128$
+	Texture differentiation.
+	Additionally, the wrapper should support a Dict observation space to include auxiliary data such as the "last action taken" (proprioception) and any audio-derived signals (e.g., a boolean flag for "hit sound detected").
+
+
+3.2 The Supervisor: Handling Crashes and Permadeath
+
+
+The research indicates Half Sword is prone to crashes, particularly when transitioning between menus or upon death.18 A simple Python script will hang indefinitely if the game freezes. We require a "Supervisor" class wrapping the environment.
+The Supervisor must perform the following "Watchdog" duties:
+1. Process Monitoring: Continuously check if HalfSwordUE5.exe is responding using psutil. If the process hangs (CPU usage drops to near zero or memory stabilizes for an extended period), the Supervisor must kill the process.
+2. Save File Management: To automate the "Gauntlet" mode training, the Supervisor must detect the "Game Over" screen. Upon detection, it should execute a script to locate the AppData/Local/HalfSwordUE5/Saved/SaveGames directory and delete SG Gauntlet Progress.sav.11 This programmatic "wipe" mimics the manual deletion players perform to reset their runs, ensuring the agent always starts from a valid initial state.
+3. Menu Navigation: The wrapper needs a robust macro system to navigate the main menu. Since the menu buttons are not accessible via API, the agent must use blind coordinate clicks (e.g., pydirectinput.click(x=960, y=540)).13 To make this robust, we implement computer vision checks: "Does the screen look like the main menu?" (e.g., check for specific text features or logo brightness) before clicking.
+
+
+3.3 Reward Function Engineering
+
+
+A dense, well-shaped reward function is essential for guiding the agent through the early stages of learning. We propose a composite reward signal $R_t$:
+
+
+$$R_t = R_{blood} + R_{survival} + R_{centering} - R_{pain} - R_{whiff}$$
+* $R_{blood}$ (Damage Dealt): Calculated by the frame-to-frame increase in red pixels within the central region of the screen (where the enemy resides). Thresholding is required to distinguish enemy blood from environmental red objects.
+* $R_{pain}$ (Damage Taken): Calculated by the saturation of the "red vignette" at the screen borders.6 This is a critical negative reward to encourage blocking and evasion.
+* $R_{survival}$: A small positive constant (e.g., $+0.01$) for every frame the agent remains alive. This prevents the agent from giving up immediately but must be balanced to prevent "kiting" (running away indefinitely).
+* $R_{centering}$: A reward for keeping the enemy's bounding box (detected via a basic pre-trained object detector or blob tracking) in the center of the frame. This mimics the "Lock On" mechanic 4 and encourages the agent to face its threat.
+* $R_{whiff}$ (Energy Penalty): A small negative penalty for high-velocity mouse movements that do not result in a "hit" (no blood/audio feedback). This discourages the agent from flailing wildly, promoting energy conservation.
+
+
+4. Actuation Engineering: Continuous Control and Mouse Smoothing
+
+
+The most significant deficiency in the provided code is the use of spaces.Discrete. Mapping complex physics interactions to 'W', 'A', 'S', 'D' is akin to driving a car using a keyboard—possible, but optimal performance is severely capped. Half Sword requires continuous control.
+
+
+4.1 Transitioning to Continuous Action Spaces
+
+
+We must transition the action space to gymnasium.spaces.Box. The proposed action vector $a_t$ is defined as:
+
+
+$$a_t \in \mathbb{R}^5, \quad a_t = [v_x, v_y, m_x, m_y, c]$$
+* $v_x, v_y \in [-1, 1]$: Mouse velocity vector. This controls the weapon swing direction and speed. A value of $1.0$ represents the maximum safe mouse speed, while $0.1$ represents a subtle adjustment.
+* $m_x, m_y \in [-1, 1]$: Analog movement vector. While keyboards are digital, the agent can modulate the duration of the keypress within a frame step to simulate analog movement (Pulse Width Modulation), or use virtual joystick drivers if supported.
+* $c \in [-1, 1]$: A trigger for binary actions (attacks/grabs). If $c > 0.5$, the agent clicks.
+This continuous space allows the policy to learn the subtle difference between a "probing jab" (low velocity forward mouse) and a "decapitating swing" (high velocity horizontal mouse).
+
+
+4.2 The "Teleportation" Problem and Physics Instability
+
+
+Standard Python mouse libraries like pydirectinput or pyautogui typically move the cursor instantaneously (teleportation). In a physics engine, if the mouse moves from $(0,0)$ to $(500,0)$ in a single frame, the weapon attached to the camera/hand tries to accelerate infinitely to catch up. This results in physics glitches: the weapon may phase through the enemy without collision or bounce unpredictably.20
+To interact with Half Sword effectively, the agent's mouse movement must be smooth and gradual, respecting the inertia of the virtual object.
+
+
+4.3 Human-Like Mouse Smoothing Algorithms
+
+
+To solve the physics instability and mimic high-level play, we must implement an ActionWrapper that interpolates the agent's desired target into a stream of micro-movements. Research into human-like cursor movement suggests using Bezier Curves or WindMouse algorithms.21
+
+
+4.3.1 Bezier Curve Implementation
+
+
+Instead of moving linearly from Point A to Point B, the wrapper generates a quadratic Bezier curve defined by a control point.
+$$B(t) = (1-t)^2 P_0 + 2(1-t)t P_1 + t^2 P_2, \quad t \in $$
+* $P_0$: Current Mouse Position.
+* $P_2$: Target Mouse Position (determined by agent action).
+* $P_1$: Control Point, randomized to add "organic" noise.
+The ActionWrapper intercepts the action $a_t$, calculates this curve, and executes it over a duration of $N$ milliseconds (e.g., 50ms) using a tight loop of pydirectinput.moveRel calls.23 This effectively acts as a low-pass filter on the agent's output, smoothing out high-frequency jitters that would confuse the physics engine.24
+
+
+4.3.2 The WindMouse Algorithm
+
+
+For even greater fidelity, specifically to avoid bot detection mechanisms (though less relevant in a single-player game, valuable for realism), the WindMouse algorithm simulates motor noise and variable acceleration.22 It models the force applied to the mouse as influenced by a "wind" force (noise) and a gravitational force towards the target. Implementing this ensures that the agent's swings have the characteristic "acceleration-deceleration" profile of a human arm, maximizing the kinetic energy transfer in the game's physics engine.
+
+
+5. Neural Architecture: RecurrentPPO and Memory
+
+
+The partial observability of Half Sword—where the momentum of a swing or the balance of a character is not visible in a single frame—mandates a memory-based architecture.
+
+
+5.1 The Necessity of Recurrent Policies
+
+
+Standard PPO (Proximal Policy Optimization) assumes the current observation is a sufficient statistic for the state. However, in Half Sword, a "swing" is a temporal sequence. The decision to continue a swing or abort it depends on the momentum initiated ten frames ago. A standard CNN policy might see a frame where the sword is stationary (at the apex of a swing) and, lacking velocity context, decide to start a new swing, leading to a stuttering, ineffective attack.
+We employ RecurrentPPO (PPO with LSTM) from the sb3-contrib library.25 The Long Short-Term Memory (LSTM) network maintains a hidden state vector $h_t$ that encodes the history of observations.
+
+
+$$h_t = \text{LSTM}(x_t, h_{t-1})$$
+
+
+$$\pi(a_t | h_t), \quad V(h_t)$$
+This hidden state allows the agent to "remember" the velocity of its weapon and the injury state of its legs, even if these are not explicitly visible in the current pixel buffer.
+
+
+5.2 Hyperparameter Tuning for Physics Control
+
+
+Training in physics-based environments requires distinct hyperparameters compared to arcade games. Drawing from research on Unity ML-Agents (specifically the "Walker" and "Ragdoll" benchmarks which share similarities with Half Sword), we recommend the following configuration 27:
+
+
+Hyperparameter
+	Recommended Value
+	Reasoning
+	Algorithm
+	RecurrentPPO
+	Handles partial observability of momentum/balance.
+	Horizon (n_steps)
+	2048 - 4096
+	Physics interactions are long-tail; long horizons capture the full consequence of a swing.
+	Batch Size
+	1024 - 2048
+	Noisy physics gradients require large batches for stable estimation.
+	Learning Rate
+	Linear Decay ($3 \times 10^{-4} \to 1 \times 10^{-5}$)
+	High initial learning for exploration, low final rate for fine motor control.
+	Entropy Coefficient
+	$0.01 \to 0.005$
+	Prevents early collapse into degenerate strategies (e.g., "helicoptering" the mouse).
+	LSTM Hidden Size
+	256 or 512
+	Sufficient capacity to model complex ragdoll dynamics.29
+	Layers
+	2
+	Deeper networks capture hierarchical features (limb position -> body pose -> tactical state).
+	
+
+5.3 Visual Encoding Architecture
+
+
+The visual encoder (CNN) must be robust to the noise of the game's textures. A standard NatureCNN (used in DQN) is a good baseline. However, given the importance of fine details like the "red vignette," a ResNet-style architecture with residual connections might offer better feature propagation. For the initial implementation, the standard 3-layer CNN provided by Stable Baselines3 is sufficient, provided the input resolution is increased to at least $128 \times 128$ to resolve the enemy's limb positions.
+
+
+6. Imitation Learning: The "Massive Improvement"
+
+
+The most significant upgrade to the user's proposed system is the integration of Imitation Learning (IL). Reinforcement Learning from scratch ("Tabula Rasa") in a sparse-reward, high-dimensional physics environment is incredibly inefficient. The agent will likely spend millions of steps flailing on the ground before learning to stand, let alone fight. To achieve "complete autonomy" and competence, we must bootstrap the agent with human knowledge.
+
+
+6.1 The Data Collection Pipeline
+
+
+We must engineer a "Data Collection Mode" into the agent script. In this mode, the human plays the game, and the script records the (Observation, Action, Reward, Terminal) tuples.
+Trajectory Structure:
+The imitation library utilizes a specific Trajectory dataclass.30 We must create a buffer that stores:
+* obs: The sequence of RGB frames.
+* acts: The sequence of continuous mouse/keyboard inputs (normalized).
+* infos: Auxiliary data.
+* terminal: Flags for when a round ends.
+These trajectories are serialized into .pkl or .npz files. To capture high-quality data, the human expert should demonstrate specific skills: proper spacing, effective overhead swings, and the use of the 'G' key to surrender when overwhelmed.17
+
+
+6.2 Behavioral Cloning (BC)
+
+
+Once a dataset of 50-100 successful fights is recorded, we use Behavioral Cloning (BC) to pre-train the policy.31 BC treats the problem as supervised learning: finding the parameters $\theta$ that maximize the likelihood of the expert's actions given the observations.
+
+
+$$\mathcal{L}_{BC}(\theta) = \mathbb{E}_{(s,a) \sim \mathcal{D}} [ -\log \pi_\theta(a|s) ]$$
+This phase initializes the neural network with a policy that already understands the basics of movement and attacking. It effectively skips the "flailing" phase of RL. The agent starts training with a basic competency level, capable of standing and swinging.
+
+
+6.3 Transitioning to RL (The Fine-Tuning Phase)
+
+
+After BC pre-training, we switch the training mode to RecurrentPPO. The agent interacts with the environment, collecting its own data. The PPO updates allow the agent to refine the cloned behavior, correcting errors in the human's playstyle and discovering super-human reflexes or physics exploits that the human could not execute. This "Pretrain-then-Finetune" workflow is the gold standard for complex control tasks.32
+
+
+7. Infrastructure, Stability, and Vectorization
+
+
+Deploying this architecture requires a robust software infrastructure capable of managing the instability of the Half Sword demo.
+
+
+7.1 Vectorized Environments (SubprocVecEnv)
+
+
+Training a complex agent on a single game instance is too slow. We must utilize SubprocVecEnv to run multiple instances of Half Sword in parallel.34 However, rendering multiple UE5 instances is GPU-intensive.
+Optimization Strategy:
+* Resolution Scaling: Configure the game instances to run at the lowest possible resolution and graphical quality.19 The agent's observation can be downscaled, but the game's internal rendering should be minimized to save GPU cycles.
+* Window Management: The Supervisor must identify unique window handles for each process (HalfSwordUE5.exe) and map the mss screen grabber to the specific bounds of each window. This allows the agent to "see" multiple games running on a single desktop, even if they overlap (provided the window capture hook allows it, otherwise tiling is required).
+
+
+7.2 The "Autonomy" Loop
+
+
+To make the system "completely autonomous" as requested, the script must handle the entire lifecycle:
+1. Startup: Launch $N$ instances of the game.
+2. Monitoring: Use psutil to watch for frozen processes.
+3. Reset: If an instance is stuck on a death screen or the "Gauntlet" menu, perform the file deletion reset or menu navigation macro.
+4. Training: execute the PPO learn loop.
+5. Checkpointing: Save models every $K$ steps to prevent data loss from crashes.
+This loop removes the need for human intervention, allowing the agent to train overnight or over weekends.
+
+
+8. Advanced Tactics & Emergent Behavior
+
+
+With this architecture, we expect specific emergent behaviors that leverage the game's deeper mechanics.
+
+
+8.1 Spacing and Reach
+
+
+The continuous action space allows the agent to learn precise spacing—keeping the enemy exactly at the tip of the sword's reach. Unlike a discrete agent that must step "one unit" forward or back, the continuous agent can micro-adjust its position ($m_y = 0.05$) to maintain optimal distance.
+
+
+8.2 Surrender Exploitation
+
+
+The agent may learn to exploit the surrender mechanics. By recognizing the visual cues of an enemy's low health (bloodiness/posture), the agent might learn to hold its weapon in a "threatening" pose (high guard) to trigger a surrender 15, ending the fight quickly without risking damage. Alternatively, it might learn to abuse the 'G' key surrender mechanic itself to salvage a run that is statistically likely to fail, maximizing its long-term reward over the "Gauntlet."
+
+
+9. Implementation Roadmap & Code Architecture
+
+
+The following section details the code structure required to implement this report's recommendations. This code refactors the user's initial script into a modular, class-based system supporting the advanced features discussed.
+
+
+9.1 Code Structure Overview
+
+
+1. HalfSwordEnv: The core environment class. Handles RGB observation, death detection, and file-based resets.
+2. SmoothActionWrapper: Intercepts continuous actions and applies Bezier smoothing before sending to pydirectinput.
+3. Supervisor: A standalone thread/process that monitors game health and handles the "Gauntlet" file resetting.
+4. DataCollector: A mode for recording human trajectories.
+5. Trainer: The main entry point for BC pre-training and RecurrentPPO fine-tuning.
+
+
+9.2 Refactored Environment Code (Key Components)
+
+
+
+
+Python
+
+
+
+
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+import cv2
+import mss
+import pydirectinput
+import time
+import os
+import shutil
+import psutil
+
+# --- CONSTANTS ---
+SAVE_FILE_PATH = os.path.expandvars(r'%LOCALAPPDATA%\HalfSwordUE5\Saved\SaveGames\SG Gauntlet Progress.sav')
+GAME_PROCESS_NAME = "HalfSwordUE5.exe"
+
+class HalfSwordEnv(gym.Env):
+   """
+   Advanced Environment for Half Sword with RGB observations and Death Handling.
+   """
+   def __init__(self, render_mode=None):
+       super().__init__()
+       # Continuous Action Space:
+       self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
+       
+       # RGB Observation: (Channels, Height, Width)
+       # Using 128x128 for better detail on blood/vignette
+       self.observation_space = spaces.Box(low=0, high=255, shape=(3, 128, 128), dtype=np.uint8)
+       
+       self.sct = mss.mss()
+       self.monitor = {"top": 40, "left": 0, "width": 1920, "height": 1040} 
+       self.last_health_vignette = 0.0
+
+   def reset(self, seed=None, options=None):
+       super().reset(seed=seed)
+       
+       # Check for Death/Menu State
+       if self._detect_death_screen():
+           self._handle_death_reset()
+           
+       # Return initial observation
+       return self._get_obs(), {}
+
+   def step(self, action):
+       # Action is handled by the Wrapper, so here we just capture the result
+       # Calculate Reward
+       obs = self._get_obs()
+       reward, done = self._calculate_reward_and_done(obs)
+       
+       # Check for surrender/G-key usage (if we add that action)
+       #...
+       
+       return obs, reward, done, False, {}
+
+   def _get_obs(self):
+       sct_img = self.sct.grab(self.monitor)
+       img = np.array(sct_img)
+       img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB) # RGB for CNN
+       img = cv2.resize(img, (128, 128), interpolation=cv2.INTER_AREA)
+       return np.moveaxis(img, -1, 0) # Channels First
+
+   def _detect_death_screen(self):
+       # Analyze screen for pure black or "You Died" text features
+       obs = self._get_obs()
+       # Simple heuristic: extremely low brightness
+       if np.mean(obs) < 5.0: return True
+       return False
+
+   def _handle_death_reset(self):
+       # If in Gauntlet mode, we might need to nuke the save file
+       if os.path.exists(SAVE_FILE_PATH):
+           try:
+               os.remove(SAVE_FILE_PATH)
+               print("Gauntlet Save Wiped for Reset.")
+           except PermissionError:
+               pass # File might be locked
+       
+       # Input sequence to restart
+       pydirectinput.press('esc')
+       time.sleep(0.5)
+       # Blind click for restart button (needs calibration)
+       pydirectinput.click(960, 540)
+       time.sleep(2.0)
+       
+   def _calculate_reward_and_done(self, obs):
+       # 1. Detect Red Vignette (Self Damage)
+       # Mask center, check borders
+       # Calculate saturation of red in ROI
+       #...
+       
+       # 2. Detect Enemy Blood (Success)
+       # Check center ROI for red variance increase
+       
+       # 3. Survival Reward
+       reward = 0.01
+       
+       done = self._detect_death_screen()
+       if done: reward = -10.0
+       
+       return reward, done
+
+
+
+9.3 The Smoothing Wrapper
+
+
+
+
+Python
+
+
+
+
+class SmoothActionWrapper(gym.ActionWrapper):
+   """
+   Applies Bezier curve smoothing to mouse actions to mimic human movement
+   and prevent physics engine glitches.
+   """
+   def action(self, action):
+       # action is [-1, 1]
+       # Scale to pixels
+       target_dx = action * 300 # Max 300 pixels per step
+       target_dy = action * 300
+       
+       # Generate Bezier path
+       self._execute_bezier_move(target_dx, target_dy)
+       
+       # Handle WASD (Thresholding)
+       self._execute_keyboard(action, action)
+       
+       return action
+
+   def _execute_bezier_move(self, dx, dy):
+       # Bezier logic here (as described in Section 4.3.1)
+       # Use pydirectinput.moveRel inside a loop
+       pass
+
+
+
+10. Conclusion
+
+
+The path to a truly autonomous Half Sword agent lies in respecting the simulation's complexity. By discarding the discrete, simplified control scheme in favor of continuous, smoothed actuation, and by upgrading the perception system to handle the nuanced visual feedback of blood and damage, we align the AI's capabilities with the game's design. The integration of RecurrentPPO provides the necessary memory to handle ragdoll momentum, while the application of Behavioral Cloning provides the critical "knowledge jumpstart" needed to navigate sparse-reward physics combat. This architecture moves beyond simple scripting into the realm of high-fidelity, learning-based game AI, capable of mastering the brutal physics of the medieval arena.
+Works cited
+1. Tips for control? : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1g8we4t/tips_for_control/
+2. The Ultimate Guide To Half Sword Mechanics! (New Players) - YouTube, accessed November 22, 2025, https://www.youtube.com/watch?v=7BSxBuaaa64
+3. Half Sword Settings | Explanation Requested - Steam Community, accessed November 22, 2025, https://steamcommunity.com/app/2397300/discussions/0/4754201033330644994/
+4. Hitting necks of enemies is much harder to do in demo compared to playtest : r/HalfSword, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1jr7473/hitting_necks_of_enemies_is_much_harder_to_do_in/
+5. Dev's "Vignette Effect" when you take damage and low armor. "Pls reduce" - Reddit, accessed November 22, 2025, https://www.reddit.com/r/outriders/comments/malz8n/devs_vignette_effect_when_you_take_damage_and_low/
+6. How does damage work? : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1g9ibxr/how_does_damage_work/
+7. Constant squelching sound : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1hkfprf/constant_squelching_sound/
+8. Please remove the death screen - HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1j9whj5/please_remove_the_death_screen/
+9. Death scene is too quick : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1ji1cq3/death_scene_is_too_quick/
+10. How can I restart the Gauntlet mode? - HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1kf5tfh/how_can_i_restart_the_gauntlet_mode/
+11. How do I restart my progress to beggar mode : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1k0bmjc/how_do_i_restart_my_progress_to_beggar_mode/
+12. when ever i press restart or go back to menu it stops responding :: Half Sword General Discussions - Steam Community, accessed November 22, 2025, https://steamcommunity.com/app/2397300/discussions/0/3935643263195348655/
+13. hey guys >.< just started the game!! is there a way to make them peacefully surrender? :3 : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/19e3xmn/hey_guys_just_started_the_game_is_there_a_way_to/
+14. Sometimes enemy doesn't surrender when weapon is held at his neck : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1npgkwl/sometimes_enemy_doesnt_surrender_when_weapon_is/
+15. Hack for auto-surrender : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1i1ke2y/hack_for_autosurrender/
+16. TIP: If you think you're gonna die, hold G : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1jye1pp/tip_if_you_think_youre_gonna_die_hold_g/
+17. Why does it crash when I try to go back to the menu. : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1ep6e0w/why_does_it_crash_when_i_try_to_go_back_to_the/
+18. Why dose my game crash every time I try to go back to menu is my laptop just sh*t : r/HalfSword - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1ekee4d/why_dose_my_game_crash_every_time_i_try_to_go/
+19. Is this a Graphic glitch during Halfsword stab? my FPS is set at 60. My computer can do 90 and 120 but I saw my ram led lit up red at times so I dropped it to 60. Is that what's causing it or it's just the game? - Reddit, accessed November 22, 2025, https://www.reddit.com/r/HalfSword/comments/1jf2kb2/is_this_a_graphic_glitch_during_halfsword_stab_my/
+20. Smooth Mouse Movement in Python with PyAutoGUI and Bezier Curves - YouTube, accessed November 22, 2025, https://www.youtube.com/watch?v=9uUyDYUFcKE
+21. WindMouse, an algorithm for generating human-like mouse motion | ben.land, accessed November 22, 2025, https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/
+22. How do I make mouse movement gradual with pydirectinput - Stack Overflow, accessed November 22, 2025, https://stackoverflow.com/questions/77407439/how-do-i-make-mouse-movement-gradual-with-pydirectinput
+23. How to avoid rapid actuator movements in favor of smooth movements in a continuous space and action space problem? - AI Stack Exchange, accessed November 22, 2025, https://ai.stackexchange.com/questions/17774/how-to-avoid-rapid-actuator-movements-in-favor-of-smooth-movements-in-a-continuo
+24. PPO vs RecurrentPPO (aka PPO LSTM) on environments with masked velocity (SB3 Contrib) | no-vel-envs – Weights & Biases - Wandb, accessed November 22, 2025, https://wandb.ai/sb3/no-vel-envs/reports/PPO-vs-RecurrentPPO-aka-PPO-LSTM-on-environments-with-masked-velocity-SB3-Contrib---VmlldzoxOTI4NjE4
+25. Recurrent PPO — Stable Baselines3 - Contrib 2.7.1a3 documentation, accessed November 22, 2025, https://sb3-contrib.readthedocs.io/en/master/modules/ppo_recurrent.html
+26. WalkerAgent with Unity ML-Agents - GitHub, accessed November 22, 2025, https://github.com/Kooroshoo/ml-agents
+27. Hyperparameter Tuning for Unity ML-Agents - YouTube, accessed November 22, 2025, https://www.youtube.com/watch?v=ZKzXAVp8bC8
+28. ML-Agents Ragdoll Trainer Project : r/Unity3D - Reddit, accessed November 22, 2025, https://www.reddit.com/r/Unity3D/comments/nkon79/mlagents_ragdoll_trainer_project/
+29. Trajectories - imitation - Read the Docs, accessed November 22, 2025, https://imitation.readthedocs.io/en/latest/main-concepts/trajectories.html
+30. Behavioral Cloning (BC) - imitation, accessed November 22, 2025, https://imitation.readthedocs.io/en/latest/algorithms/bc.html
+31. Pre-Training (Behavior Cloning) — Stable Baselines 2.10.3a0 documentation, accessed November 22, 2025, https://stable-baselines.readthedocs.io/en/master/guide/pretrain.html
+32. Add support for pretraining [feature request] · Issue #27 · DLR-RM/stable-baselines3, accessed November 22, 2025, https://github.com/DLR-RM/stable-baselines3/issues/27
+33. PPO — Stable Baselines3 2.4.0 documentation - Read the Docs, accessed November 22, 2025, https://stable-baselines3.readthedocs.io/en/v2.4.0/modules/ppo.html
+34. Examples — Stable Baselines3 1.0 documentation - Read the Docs, accessed November 22, 2025, https://stable-baselines3.readthedocs.io/en/v1.0/guide/examples.html

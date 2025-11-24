@@ -1,0 +1,364 @@
+﻿Technical Compendium: Reward Function Architecture for Physics-Based Medieval Combat Agents in Half Sword
+
+
+
+
+1. Introduction: The Intersection of Historical Fencing and Deep Reinforcement Learning
+
+
+The domain of physics-based character animation has evolved from simple ragdoll amusement into a rigorous discipline requiring sophisticated control strategies. Half Sword, a medieval combat simulator developed by Half Sword Games, represents a distinct frontier in this field. Unlike traditional combat games that rely on kinematic animation playback—where a "swing" is a pre-recorded animation file played upon a button press—Half Sword employs a fully simulated active ragdoll system.1 In this environment, the character, colloquially known as "Willie" by the community, is driven by internal physical forces (torques) applied to joints in an attempt to reach target poses, subject to the constraints of gravity, friction, momentum, and external collisions.2
+This report serves as a comprehensive technical design document for constructing a Deep Reinforcement Learning (DRL) agent capable of mastering Half Sword. The challenge is multifaceted: the agent must not only learn high-level strategy (when to strike) but also low-level motor control (how to stand up, how to align the edge of a blade). The research indicates that the game’s physics engine is unforgiving; distinct mechanics such as edge alignment, armor penetration, and balance stability create a high-dimensional continuous control problem.1
+To solve this, we cannot rely on sparse rewards (winning or losing). We must engineer a dense, shaped reward landscape that incentivizes biomechanically efficient movement, historically accurate fencing techniques (HEMA), and robust recovery behaviors. This analysis synthesizes gameplay data, community research on physics quirks, and academic principles of Reinforcement Learning to propose a complete reward function architecture.
+
+
+2. Environment Characterization and Physical Constraints
+
+
+Before defining the solution (rewards), one must rigorously define the problem (the environment). The Half Sword environment differs fundamentally from standard RL benchmarks like MuJoCo or Atari due to its specific implementation of active ragdolls and damage calculations.
+
+
+2.1 The Active Ragdoll Controller: "Willie"
+
+
+The protagonist is strictly physics-based. The control scheme translates player inputs into forces. Understanding these inputs is critical for defining the agent's Action Space.
+* Locomotion: The WASD keys apply forces to the legs for movement. However, these are not direct velocity commands; they are requests that the physics engine attempts to fulfill, often leading to instability if the center of mass is not managed.4
+* Torso and Hand Control: The mouse controls the orientation of the upper body and the hands. The X-axis typically governs rotation (yaw), while the Y-axis governs pitch. This creates a disconnect: the player (or agent) commands a target position, but the actual position of the weapon lags behind due to simulated mass and inertia.5
+* Hand Independence: The game allows independent control of left and right hands (LMB and RMB), and specific grab mechanics (Q and E).4 This bifurcates the control policy; the agent must coordinate two independent end-effectors (hands) that share a common kinematic base (the torso), creating significant noise and potential for self-collision.
+
+
+2.1.1 The Instability Problem
+
+
+A pervasive theme in the research material is the inherent instability of the character. Players report that "Willie" falls over with minimal provocation, often tripping over his own feet or small obstacles.2 This "drunken" behavior is a result of the active ragdoll trying to balance a heavy upper body (often holding a heavy weapon) on a relatively narrow support polygon.
+The implication for Machine Learning is severe. An unshaped RL agent will likely spend the first million training steps simply falling over. If the penalty for falling is too low, the agent may learn to fight from the ground (the "crab" strategy), which is mechanically undesirable and historically inaccurate. If the penalty is too high, the agent may become risk-averse, refusing to move or swing weapons to avoid disrupting its delicate balance.7
+
+
+2.1.2 The "Spaghetti Arm" Phenomenon
+
+
+High-velocity mouse movements do not result in instantaneous weapon movement. Instead, they apply acceleration. If the agent oscillates the input vector too rapidly, the arms—simulated as chains of rigid bodies connected by joints—can lose structural integrity, appearing to flail like "spaghetti".8 This results in weak, non-committal strikes that bounce off armor. A human player overcomes this by "stiffening" their inputs or moving smoothly; the RL agent must be incentivized to produce smooth, continuous torque trajectories rather than high-frequency jitter, necessitating specific regularization terms in the reward function.9
+
+
+2.2 The Physics of Damage: A Multi-Variable Equation
+
+
+The damage model in Half Sword is not a simple subtraction of Health Points (HP). It is a physics calculation derived from three primary variables: Mass, Velocity, and Edge Alignment.
+Table 1: Key Physics Variables Influencing Damage
+
+
+Variable
+	Definition
+	Impact on Gameplay
+	RL Implication
+	Mass ($m$)
+	The weight of the weapon (e.g., 1.5kg Sword vs. 0.08kg Bullet).10
+	High mass yields high momentum ($p=mv$) but slower acceleration.
+	Agent must learn to commit to swings earlier with heavy weapons.
+	Velocity ($v$)
+	The speed of the impact point (tip or percussion center).11
+	Kinetic energy scales with $v^2$, making speed critical for damage.
+	Reward function must prioritize tip velocity, not just hand velocity.
+	Edge Alignment ($\theta$)
+	The angle between the velocity vector and the blade's cutting plane.1
+	Misalignment ($\theta > 20^\circ$) converts cuts to blunt impacts (near zero damage for swords).
+	This is the single most critical term for the offensive reward function.
+	Material Hardness
+	The resistance of the target surface (Flesh vs. Plate).
+	Metal armor negates cutting damage entirely; only blunt or piercing works.1
+	Agent must classify target texture and switch attack modes (Slash vs. Thrust).
+	
+
+2.2.1 Edge Alignment Mechanics
+
+
+The research explicitly states that "you have to aim for unarmored areas and make sure your edge is aligned... You get no slashing damage against metal".1 Furthermore, if the edge is not aligned, the weapon acts as a club. This is a nuanced mechanic: a sword swing that is 10% misaligned might still cut, but a swing that is 45% misaligned will glance off. This requires the agent to understand the orientation of the weapon mesh relative to its motion vector, a concept derived from real-world fencing physics.3
+
+
+2.2.2 The Armor Threshold
+
+
+The game implements a sophisticated armor system where weapons interact with the physical mesh of the armor. Stabbing weapons can slide into gaps (like armpits or visors), while slashing weapons will deflect off plates.12 Recent updates have reportedly made armor penetration even more strict, requiring precise thrusts to bypass protection.13 This means a reward function based solely on "contact" is insufficient; hitting a breastplate with a sword slash is effectively a zero-utility action (or negative, due to stamina loss and exposure). The reward must be context-aware, valuing specific impact coordinates on the enemy body.
+
+
+3. Theoretical Framework: Potential-Based Reward Shaping (PBRS)
+
+
+Training an agent in Half Sword using only a sparse reward signal (e.g., +1 for killing the opponent, -1 for dying) would be computationally intractable. The state space is too large, and the failure modes (falling) are too frequent. We must employ Reward Shaping to guide the learning process.
+
+
+3.1 The Danger of Reward Hacking
+
+
+Naive reward shaping often leads to "Reward Hacking" or specification gaming.14
+* Example: If we reward the agent for "Weapon Velocity," the agent might stand in place and spin the weapon in a circle like a helicopter. This maximizes the velocity reward but accomplishes nothing tactically.
+* Example: If we reward "Distance to Enemy," the agent might run directly at the enemy and collide, rather than maintaining proper fencing measure.15
+
+
+3.2 Implementing PBRS
+
+
+To avoid hacking, we use Potential-Based Reward Shaping (PBRS). As defined in the literature, PBRS ensures that the optimal policy of the agent remains unchanged by the shaping rewards.16
+The shaping reward $F$ is defined as the difference in a potential function $\Phi$ between the current state $s$ and the next state $s'$:
+
+
+
+
+$$F(s, s') = \gamma \Phi(s') - \Phi(s)$$
+
+
+Where $\gamma$ is the discount factor.
+For Half Sword, potential functions can represent strategic concepts:
+* Health Potential: $\Phi_{hp} = (Health_{self} - Health_{opponent})$.
+* Positional Potential: $\Phi_{pos} = -|Distance - OptimalRange|$.
+By rewarding the change in potential, we reward the agent only for improving its situation (getting closer to the optimal range, or increasing the health gap), rather than for simply being in a state.
+
+
+4. Layer 1: Locomotion and Stability Rewards
+
+
+The most immediate frustration for players—and the biggest hurdle for an AI—is the character's tendency to trip.2 Before the agent can fence, it must learn to stand.
+
+
+4.1 Center of Mass (CoM) Projection Reward
+
+
+Stability in a physics simulation is defined by the relationship between the Center of Mass (CoM) and the Support Polygon (the area enclosed by the feet).
+We define a continuous reward $r_{balance}$ that incentivizes keeping the projected CoM ($P_{CoM}$) close to the centroid of the Support Polygon ($C_{poly}$).18
+
+
+$$r_{balance} = e^{-k ||P_{CoM} - C_{poly}||^2}$$
+   * Mechanism: When the agent swings a heavy weapon (e.g., a poleaxe), the CoM shifts rapidly. To maximize this reward, the agent must learn to step in the direction of the swing, widening its base of support. This naturally leads to the emergence of "footwork" without explicitly programming it.
+   * Context: Community feedback notes that "holding shift gets you into stance and makes the controls a lot more responsive and you trip less".19 This implies a lower center of gravity is beneficial. We can augment the reward to favor a specific range of CoM heights, penalizing the "semi-kneeling" state that kills momentum 2 while also penalizing standing too tall and rigid.
+
+
+4.2 Anti-Cross-Stepping Constraint
+
+
+A primary cause of tripping in Half Sword is the legs colliding with each other or crossing over.2 The physics engine does not prevent self-collision.
+We introduce a penalty function $p_{cross}$:
+Let $\vec{p}_{L}$ and $\vec{p}_{R}$ be the position vectors of the left and right feet relative to the pelvis's forward vector.
+$$ p_{cross} = \begin{cases} -1.0 & \text{if } (\vec{p}{L} \cdot \vec{right}) > (\vec{p}{R} \cdot \vec{right}) \ 0 & \text{otherwise} \end{cases} $$
+This penalty activates if the left foot is to the right of the right foot (crossing). This forces the agent to adopt a "boxer" or fencing stance, keeping feet on their respective tracks.
+
+
+4.3 Recovery Efficiency Reward
+
+
+When the agent inevitably falls (state $S_{ragdoll}$), the goal shifts from "maintenance" to "recovery." The game imposes a timer or a struggle mechanic to get up, which can take up to 30 seconds in older builds, though it is a critical vulnerability window.6
+The reward function during the fallen state should be:
+
+
+
+
+$$r_{recovery} = (h_{head}(t) - h_{head}(t-1)) \cdot w_{up} - w_{time}$$
+   * Insight: This rewards the velocity of the head moving upwards. It incentivizes the agent to find the most explosive way to return to a vertical state (kip-up or tactical stand), penalizing every tick spent on the ground.
+
+
+5. Layer 2: Offensive Biomechanics and Lethality
+
+
+Once stable, the agent must learn to deal damage. This requires translating the game's physics rules into mathematical objectives.
+
+
+5.1 The Edge Alignment Dot Product
+
+
+The most sophisticated mechanic in Half Sword is Edge Alignment. A slash is only effective if the velocity vector is coplanar with the blade.1
+We define the Alignment Reward ($r_{align}$) using the dot product of the velocity vector $\vec{v}$ and the blade's normal vector $\vec{n}$ (the vector pointing out of the flat of the blade).
+
+
+$$r_{align} = 1 - |\hat{v} \cdot \hat{n}|$$
+   * Logic:
+   * If the blade moves "flat-on," $\vec{v}$ is parallel to $\vec{n}$, so $|\hat{v} \cdot \hat{n}| = 1$, and $r_{align} = 0$.
+   * If the blade moves "edge-on" (cutting), $\vec{v}$ is perpendicular to $\vec{n}$, so $|\hat{v} \cdot \hat{n}| = 0$, and $r_{align} = 1$.
+   * Gating: This reward is only given when velocity $||\vec{v}|| > 2.0 m/s$. This prevents the agent from receiving rewards for slowly aligning the blade while standing still.20
+
+
+5.2 Kinetic Energy and Momentum Transfer
+
+
+Damage scales with mass and velocity. However, lighter weapons require higher velocity to achieve the same lethality as heavier weapons.10
+
+
+$$r_{kinetic} = \frac{1}{2} m_{weapon} ||\vec{v}_{tip}||^2 \cdot r_{align}^k$$
+   * Insight: We raise the alignment term to a power $k$ (e.g., $k=3$). This acts as a harsh filter. High velocity with poor alignment yields negligible reward ($100 \times 0.1^3 = 0.1$). High velocity with good alignment yields massive reward ($100 \times 0.9^3 = 72.9$). This teaches the agent that "speed without technique is useless," mirroring the advice given to human players.3
+
+
+5.3 Armor Discrimination and Targeting
+
+
+The agent must learn that hitting plate armor with a slash is futile. We use a Context-Aware Impact Reward.
+Using modding tools to hook into the game memory 22, we can identify the material of the collider hit by the weapon.
+Table 2: Material-Action Reward Matrix
+Target Material
+	Slash Action (Cut)
+	Thrust Action (Pierce)
+	Blunt Action (Crush)
+	Flesh (Unarmored)
+	+1.0 (High Lethality)
+	+1.0 (High Lethality)
+	+0.8 (Disabling)
+	Gambeson (Cloth)
+	+0.5 (Reduced Dmg)
+	+0.8 (Penetration)
+	+0.9 (Trauma)
+	Chainmail
+	+0.1 (Glancing)
+	+0.6 (Bursting rings)
+	+1.0 (Trauma)
+	Plate Armor
+	-0.1 (Deflected/Stamina Loss)
+	+1.5 (Gap Hit Only)
+	+1.0 (Concussion)
+	   * Mechanism: If the opponent is wearing plate, the spatial reward function effectively "turns off" for the armored surfaces, leaving only the unarmored gaps (neck, armpits) as high-value targets. This uses Potential Fields: we place high reward potentials on the specific coordinates of the armor gaps, guiding the weapon tip toward them.12
+
+
+6. Layer 3: Defensive Dynamics and Spacing
+
+
+Survival in Half Sword depends on the "Passive Parry" and "Active Parry" mechanics. The "Passive Parry" is Willie's automatic tendency to deflect if the weapon is in the way; "Active Parry" is a player-controlled swatting motion.24
+
+
+6.1 The Parry Volume Reward
+
+
+We define a parry not just as a collision, but as a specific type of vector interaction. A successful parry intercepts the incoming weapon volume.
+$$ r_{parry} = \mathbb{I}(Collides(W_{self}, W_{opp})) \cdot \max(0, \vec{v}{self} \cdot -\vec{v}{opp}) $$
+   * Insight: The dot product term $\vec{v}_{self} \cdot -\vec{v}_{opp}$ rewards moving the weapon against the incoming attack vector. If the agent merely holds the weapon static ($v=0$), the reward is lower. If the agent strikes into the enemy blade, the reward is maximized. This teaches the "Active Parry" or "Beat" described by expert players.25
+
+
+6.2 Spacing (The "Footsies" Metric)
+
+
+Weapon length dictates the engagement range. A spear user wants to be far; a dagger user wants to be close.
+Let $L_{self}$ be the reach of the agent's weapon and $L_{opp}$ be the reach of the opponent's weapon.
+The Optimal Range $D_{opt}$ is defined as $L_{self} - \epsilon$ (just inside hitting range).
+
+
+
+
+$$r_{spacing} = e^{-(D_{actual} - D_{opt})^2}$$
+   * Conditional Logic: If $L_{opp} > L_{self}$ (fighting a longer weapon), the agent is in the "Danger Zone" whenever $D_{actual} \in [L_{self}, L_{opp}]$. We apply a penalty for existing in this zone without attacking. This forces the agent to either close distance rapidly (to grapple) or retreat out of range entirely, mimicking high-level "footsies".1
+
+
+7. Layer 4: Imitation Learning and Style
+
+
+Pure RL often results in "jittery" movement or exploits where the agent vibrates to glitch physics.9 To counter this, we integrate Imitation Learning (IL).
+
+
+7.1 DeepMimic Integration
+
+
+Using the methodology from the DeepMimic paper 26, we can record human gameplay (using the specific inputs of high-level players from YouTube channels like "Stridah's Angels" 27) to create reference motions.
+The reward function includes a tracking term:
+
+
+
+
+$$r_{imitation} = w_p r_{pose} + w_v r_{velocity}$$
+   * $r_{pose}$: Penalizes deviation of joint angles from the reference animation (e.g., standard HEMA guards like Vom Tag or Pflug).
+   * $r_{velocity}$: Penalizes deviation in joint velocities.
+This regularizes the agent's exploration, ensuring it adheres to biomechanically plausible postures rather than contorting into effective but unrealistic shapes (e.g., fighting backwards with arms twisted 180 degrees).28
+
+
+7.2 Energy Efficiency and Smoothness
+
+
+To prevent the "spaghetti arm" and "seizure-like" movements often seen in raw RL, we penalize the rate of change of torque (jerk) and total energy expenditure.
+
+
+
+
+$$p_{energy} = \sum ||\tau||^2 + ||\dot{\tau}||^2$$
+
+
+This incentivizes the agent to use the minimum force necessary to achieve the goal, leading to the "relaxed but structural" movement quality praised in expert play.8
+
+
+8. Implementation Strategy: Modding and Memory Hooks
+
+
+To implement these rewards, the training environment needs access to internal game variables that are not exposed on the screen. The Half Sword community has developed "Trainer Mods" that demonstrate the feasibility of reading and writing to the game's memory.22
+
+
+8.1 Required Memory Hooks
+
+
+To calculate the rewards defined above, the RL environment (Gym Wrapper) must hook the following data points:
+      1. Ragdoll Bone Transforms: Position and rotation of all 16+ major bones (Head, Chest, Upper/Lower Arms, Thighs/Shins) for CoM calculation.
+      2. Weapon State: The current velocity vector of the weapon tip and the normal vector of the blade mesh (for Edge Alignment).
+      3. Collision Manifold: Data on active collisions—specifically where a collision occurred and what material was hit (reading the physics material ID).13
+      4. Vital Stats: Precise float values for Health, Consciousness (KO threshold), and Balance stability metrics. Reading the "Bone Snapping" threshold allows the agent to learn the force limits of the skeleton.30
+
+
+8.2 Observation Space Design
+
+
+The agent's input (state) must be as rich as the reward function.
+      * Proprioception: Joint angles (sine/cosine), angular velocities, end-effector positions relative to root.
+      * Exteroception: Relative position of the opponent's head, chest, and weapon tip.
+      * Tactile: Boolean flags for "Foot Grounded" (essential for stability rewards).18
+      * Weapon Context: A vector encoding the weapon's properties: $$. This allows the same policy to adapt its spacing and alignment strategy when switching from a Dagger to a Poleaxe.1
+
+
+9. Curriculum Learning: From Toddler to Gladiator
+
+
+Training this complex system all at once is prone to failure. We propose a structured Curriculum Learning approach.31
+Phase 1: The Toddler (Locomotion Only)
+      * Goal: Stand up and walk to a target.
+      * Active Rewards: $r_{balance}$ (CoM), $p_{cross}$ (Anti-cross), $r_{recovery}$.
+      * Disabled: All combat rewards.
+      * Result: Agent learns to manage the active ragdoll's balance and recover from falls.
+Phase 2: The Swordsman (Static Targets)
+      * Goal: Strike a dummy with correct edge alignment.
+      * Active Rewards: $r_{align}$, $r_{kinetic}$, $r_{imitation}$ (HEMA poses).
+      * Result: Agent learns to generate force through the hips and align the blade, solving the "spaghetti arm" issue.
+Phase 3: The Duelist (Defensive Drilling)
+      * Goal: Survive against a script that attacks aggressively.
+      * Active Rewards: $r_{parry}$, $r_{spacing}$.
+      * Result: Agent learns to retreat, manage distance, and interpose the weapon.
+Phase 4: The Master (Full Combat)
+      * Goal: Defeat opponents with varying armor/weapons.
+      * Active Rewards: Full matrix, including Armor Discrimination.
+      * Technique: Prioritized Fictitious Self-Play (PFSP), where the agent trains against past versions of itself to prevent strategy cycling.31
+
+
+10. Conclusion
+
+
+The development of a machine learning bot for Half Sword requires a departure from traditional game AI logic. It is a physics engineering problem as much as a tactical one. By dissecting the game's specific mechanics—the unforgiving edge alignment math, the instability of the ragdoll controller, and the material physics of armor—we have constructed a reward architecture that addresses these challenges explicitly.
+The proposed system utilizes Potential-Based Reward Shaping to provide dense feedback without altering optimal policy, ensuring the agent learns to fight rather than just exploit. By layering stability, offensive biomechanics, and defensive spacing into a curriculum, we can train an agent that mirrors the skill progression of a human martial artist: first learning to stand, then learning to cut, and finally learning to win. This approach promises to yield a bot that not only challenges players but moves with the historical authenticity central to the Half Sword experience.
+Works cited
+      1. How does damage work? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1g9ibxr/how_does_damage_work/
+      2. The new physics are weird : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1jq09oi/the_new_physics_are_weird/
+      3. Edge Alignment | SBG Sword Forum, accessed November 23, 2025, https://sbg-sword-forum.forums.net/thread/18333/edge-alignment
+      4. What are the FULL game controls? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1k9ebol/what_are_the_full_game_controls/
+      5. Weapon control and edge alignment? Is it broken or a skill issue : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1k624gs/weapon_control_and_edge_alignment_is_it_broken_or/
+      6. Falling over more? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1jq70ip/falling_over_more/
+      7. Falling over constantly :: Half Sword General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/597397269593988553/
+      8. The ultimate warrior technique :: Half Sword General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/3935643840928030957/
+      9. DeepMimic: Example-Guided Deep Reinforcement Learning of Physics-Based Character Skills - Xue Bin (Jason) Peng, accessed November 23, 2025, https://xbpeng.github.io/projects/DeepMimic/DeepMimic_2018.pdf
+      10. realistic damage calculations : r/RPGdesign - Reddit, accessed November 23, 2025, https://www.reddit.com/r/RPGdesign/comments/1gx91k6/realistic_damage_calculations/
+      11. Sword Impacts and Motions - Part 2 - Association for Renaissance Martial Arts, accessed November 23, 2025, https://www.thearma.org/spotlight/GTA/motions_and_impacts2.htm
+      12. Armor penetration threshold : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1o8rmrb/armor_penetration_threshold/
+      13. Maybe weapon damage is a little too high when no momentum is behind them? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1jvmw91/maybe_weapon_damage_is_a_little_too_high_when_no/
+      14. Reward Hacking in Reinforcement Learning | Lil'Log, accessed November 23, 2025, https://lilianweng.github.io/posts/2024-11-28-reward-hacking/
+      15. Reward Shaping for Faster Learning in Reinforcement Learning - CodeSignal, accessed November 23, 2025, https://codesignal.com/learn/courses/advanced-rl-techniques-optimization-and-beyond/lessons/reward-shaping-for-faster-learning-in-reinforcement-learning
+      16. Potential-Based Reward Shaping in Reinforcement Learning | by Sophie Zhao | Medium, accessed November 23, 2025, https://medium.com/@sophiezhao_2990/potential-based-reward-shaping-in-reinforcement-learning-05da05cfb84a
+      17. Reward shaping using directed graph convolution neural networks for reinforcement learning and games - Frontiers, accessed November 23, 2025, https://www.frontiersin.org/journals/physics/articles/10.3389/fphy.2023.1310467/full
+      18. Balancing Of Active Ragdolls in Games | by Jan Schneider - Medium, accessed November 23, 2025, https://medium.com/@jacasch/balancing-of-active-ragdolls-in-games-367f146b25fb
+      19. Falling Over :: Half Sword General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/597398551725628598/
+      20. Dot Products in Games and Their Use Cases - Amir Azmi, accessed November 23, 2025, https://amirazmi.net/dot-products-in-games-and-their-use-cases/
+      21. Understanding use of dot product in speed boost pad - Game Development Stack Exchange, accessed November 23, 2025, https://gamedev.stackexchange.com/questions/184805/understanding-use-of-dot-product-in-speed-boost-pad
+      22. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 23, 2025, https://github.com/massclown/HalfSwordTrainerMod
+      23. It seems like you can pierce armor with enough force behind the strike : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1k2ej66/it_seems_like_you_can_pierce_armor_with_enough/
+      24. How to Parry or Block Attacks In Half Sword #halfsword - YouTube, accessed November 23, 2025, https://www.youtube.com/shorts/aMLTiFL1EMk
+      25. I think I'm starting to get the hang of parrying. : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1hru1ii/i_think_im_starting_to_get_the_hang_of_parrying/
+      26. DeepMimic: Example-Guided Deep Reinforcement Learning of Physics-Based Character Skills, accessed November 23, 2025, https://www.cs.ubc.ca/~van/papers/2018-TOG-deepMimic/index.html
+      27. The Ultimate Guide To Half Sword Mechanics! (New Players) - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=7BSxBuaaa64
+      28. Toward Whole-Body Locomotion for Humanoid Robot - CS 224R Deep Reinforcement Learning - Stanford University, accessed November 23, 2025, https://cs224r.stanford.edu/projects/pdfs/cs224r_project_report__2_.pdf
+      29. Half Sword Trainer Mod : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/19e1u65/half_sword_trainer_mod/
+      30. Half Sword Settings | Explanation Requested - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/4754201033330644994/?l=dutch
+      31. Syllabus: Portable Curricula for Reinforcement Learning Agents - arXiv, accessed November 23, 2025, https://arxiv.org/html/2411.11318v2

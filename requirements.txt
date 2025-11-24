@@ -1,0 +1,34 @@
+torch>=2.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+requests>=2.31.0
+psutil>=5.9.0
+pydirectinput>=1.0.4
+pyautogui>=0.9.54
+pynput>=1.7.6
+flask>=3.0.0
+flask-cors>=4.0.0
+ultralytics>=8.0.0
+
+# Optional but recommended
+dxcam>=0.1.0
+pymem>=1.10.0
+
+# ScrimBrain Integration - OCR for reward tracking
+# Install at least one for OCR score detection
+pytesseract>=0.3.10
+easyocr>=1.7.0
+
+# Gym for environment wrapper (ScrimBrain integration)
+gym>=0.26.0
+
+# Alternative keyboard library (if pynput doesn't work)
+# keyboard>=0.13.5
+
+# For interception driver (optional - requires separate driver installation)
+# Install Python library: pip install interception-python
+# Install driver: See INTERCEPTION_INSTALL.md
+# interception-python>=0.1.0  # Uncomment if installing interception
+

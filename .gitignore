@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+.venv311/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# Project specific
+logs/
+data/
+models/checkpoints/
+*.log
+*.pt
+*.pth
+yolov8n.pt
+
+# Archives and large files
+*.zip
+*.rar
+*.7z
+archive/
+Interception-master.zip
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+nul
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Dataset files (large)
+*.csv
+*.parquet
+*.h5
+*.hdf5
+Dataset*.txt
+
+# Sensitive files
+.env
+*.key
+*.pem
+config.local.py
+secrets.json
+

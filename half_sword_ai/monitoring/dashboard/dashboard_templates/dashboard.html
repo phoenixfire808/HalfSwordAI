@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Half Sword AI Agent - Live Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 20px;
+            border-bottom: 2px solid #00d4ff;
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .header h1 {
+            color: #00d4ff;
+            font-size: 2em;
+            text-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            padding: 8px 16px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+
+        .status-item.active {
+            background: rgba(0, 255, 100, 0.2);
+            border-color: rgba(0, 255, 100, 0.5);
+        }
+
+        .status-item.warning {
+            background: rgba(255, 200, 0, 0.2);
+            border-color: rgba(255, 200, 0, 0.5);
+        }
+
+        .status-item.danger {
+            background: rgba(255, 50, 50, 0.2);
+            border-color: rgba(255, 50, 50, 0.5);
+        }
+
+        .container {
+            max-width: 1920px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: #1a1a2e;
+            border: 1px solid #2a2a3e;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #2a2a3e;
+        }
+
+        .card-title {
+            color: #00d4ff;
+            font-size: 1.3em;
+            font-weight: bold;
+        }
+
+        .card-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #00ff88;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+        }
+
+        .card-large {
+            grid-column: span 2;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .metric {
+            background: rgba(0, 212, 255, 0.05);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .metric-label {
+            color: #888;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .metric-value {
+            color: #00d4ff;
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+
+        .metric-unit {
+            color: #666;
+            font-size: 0.8em;
+            margin-left: 5px;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 15px;
+        }
+
+        .log-container {
+            max-height: 400px;
+            overflow-y: auto;
+            background: #0f0f1a;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .log-entry {
+            padding: 5px;
+            margin-bottom: 5px;
+            border-left: 3px solid #2a2a3e;
+            padding-left: 10px;
+        }
+
+        .log-entry.error {
+            border-left-color: #ff5050;
+            background: rgba(255, 50, 50, 0.1);
+        }
+
+        .log-entry.warning {
+            border-left-color: #ffc800;
+            background: rgba(255, 200, 0, 0.1);
+        }
+
+        .log-entry.info {
+            border-left-color: #00d4ff;
+        }
+
+        .log-time {
+            color: #666;
+            margin-right: 10px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #0f0f1a;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            transition: width 0.3s;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .kill-switch-button {
+            background: linear-gradient(135deg, #ff5050, #cc0000);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.2em;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(255, 50, 50, 0.4);
+            transition: all 0.2s;
+        }
+
+        .kill-switch-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(255, 50, 50, 0.6);
+        }
+
+        .kill-switch-button:active {
+            transform: scale(0.95);
+        }
+
+        .kill-switch-button.activated {
+            background: linear-gradient(135deg, #00ff88, #00cc66);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 4px 15px rgba(0, 255, 136, 0.4); }
+            50% { box-shadow: 0 4px 25px rgba(0, 255, 136, 0.8); }
+        }
+
+        .episode-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .episode-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            background: rgba(0, 212, 255, 0.05);
+            border-radius: 8px;
+            border-left: 4px solid #00d4ff;
+        }
+
+        .episode-item.victory {
+            border-left-color: #00ff88;
+        }
+
+        .episode-item.death {
+            border-left-color: #ff5050;
+        }
+
+        .refresh-indicator {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 10px;
+            background: rgba(0, 212, 255, 0.2);
+            border-radius: 8px;
+            font-size: 0.9em;
+        }
+
+        .refresh-indicator.active {
+            background: rgba(0, 255, 136, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>⚔️ Half Sword AI Agent - Live Dashboard</h1>
+        <div class="status-bar">
+            <div class="status-item" id="status-running">
+                <strong>Status:</strong> <span id="status-text">Connecting...</span>
+            </div>
+            <div class="status-item" id="status-fps">
+                <strong>FPS:</strong> <span id="fps-value">0</span>
+            </div>
+            <div class="status-item" id="status-episodes">
+                <strong>Episodes:</strong> <span id="episodes-value">0</span>
+            </div>
+            <div class="status-item" id="status-mode">
+                <strong>Mode:</strong> <span id="mode-value">Unknown</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="refresh-indicator" id="refresh-indicator">
+        Last update: <span id="last-update">Never</span>
+    </div>
+
+    <div class="container">
+        <!-- Performance Metrics -->
+        <div class="card card-large">
+            <div class="card-header">
+                <div class="card-title">Performance Metrics</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">FPS</div>
+                    <div class="metric-value" id="metric-fps">0<span class="metric-unit">fps</span></div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Capture Latency</div>
+                    <div class="metric-value" id="metric-capture">0<span class="metric-unit">ms</span></div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Inference Latency</div>
+                    <div class="metric-value" id="metric-inference">0<span class="metric-unit">ms</span></div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Injection Latency</div>
+                    <div class="metric-value" id="metric-injection">0<span class="metric-unit">ms</span></div>
+                </div>
+                <!-- Qwen latency metric removed -->
+            </div>
+            <div class="chart-container">
+                <canvas id="fps-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- System Resources -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">System Resources</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">CPU Usage</div>
+                <div class="metric-value" id="cpu-value">0<span class="metric-unit">%</span></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="cpu-progress" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="metric" style="margin-top: 15px;">
+                <div class="metric-label">Memory Usage</div>
+                <div class="metric-value" id="memory-value">0<span class="metric-unit">MB</span></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="memory-progress" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="metric" style="margin-top: 15px;" id="gpu-metric">
+                <div class="metric-label">GPU Memory</div>
+                <div class="metric-value" id="gpu-value">0<span class="metric-unit">MB</span></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="gpu-progress" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="chart-container">
+                <canvas id="system-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Learning Metrics -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Learning Metrics</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Training Loss</div>
+                    <div class="metric-value" id="loss-value">0.0000</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Current Reward</div>
+                    <div class="metric-value" id="reward-value">0.00</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Avg Episode Reward</div>
+                    <div class="metric-value" id="avg-reward-value">0.00</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Training Steps</div>
+                    <div class="metric-value" id="steps-value">0</div>
+                </div>
+            </div>
+            <div class="chart-container">
+                <canvas id="learning-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Real-time Training Progress -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">🔄 Real-time Training</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Training Updates</div>
+                    <div class="metric-value" id="training-updates">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Avg Loss</div>
+                    <div class="metric-value" id="training-avg-loss">0.0000</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">BC Loss</div>
+                    <div class="metric-value" id="training-bc-loss">0.0000</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Training Trend</div>
+                    <div class="metric-value" id="training-trend" style="font-size: 1.2em;">Initializing</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Human Action Ratio in Training</div>
+                <div class="metric-value" id="training-human-ratio">0%</div>
+                <div class="progress-bar" style="margin-top: 10px;">
+                    <div class="progress-fill" id="training-human-progress" style="width: 0%"></div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; font-size: 0.9em; color: #888;">
+                <div>Beta BC (Behavioral Cloning Weight): <strong id="training-beta">1.000</strong></div>
+                <div style="margin-top: 5px;">Model trains continuously as you play!</div>
+            </div>
+        </div>
+
+        <!-- Input Control -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Input Control</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Control Mode</div>
+                    <div class="metric-value" id="control-mode" style="font-size: 1.2em;">AUTONOMOUS</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Bot Injections</div>
+                    <div class="metric-value" id="injections-value">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Human Overrides</div>
+                    <div class="metric-value" id="overrides-value">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Mode Switches</div>
+                    <div class="metric-value" id="switches-value">0</div>
+                </div>
+            </div>
+            <div style="margin-top: 20px;">
+                <div class="metric-label">Safety Lock</div>
+                <div class="metric-value" id="safety-lock" style="color: #ff5050;">DISABLED</div>
+            </div>
+        </div>
+
+        <!-- Kill Switch -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Emergency Kill Switch</div>
+            </div>
+            <div style="text-align: center; padding: 20px;">
+                <button class="kill-switch-button" id="kill-button" onclick="triggerKillSwitch()">
+                    🛑 EMERGENCY STOP
+                </button>
+                <div style="margin-top: 15px; color: #888;">
+                    Hotkey: <strong id="kill-hotkey">F8</strong>
+                </div>
+                <div style="margin-top: 10px; color: #666; font-size: 0.9em;">
+                    Kill Count: <span id="kill-count">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- YOLO Object Detection -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">🎯 YOLO Object Detection</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Status</div>
+                    <div class="metric-value" id="yolo-status" style="font-size: 1.2em;">Loading...</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Objects Detected</div>
+                    <div class="metric-value" id="yolo-count">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Enemies</div>
+                    <div class="metric-value" id="yolo-enemies" style="color: #ff5050;">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Threat Level</div>
+                    <div class="metric-value" id="yolo-threat" style="font-size: 1.2em;">Unknown</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <div class="metric-label">Inference Time</div>
+                <div class="metric-value" id="yolo-inference">0<span class="metric-unit">ms</span></div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Latest Detections</div>
+                <div id="yolo-detections" style="font-size: 0.9em; color: #888; margin-top: 5px;">
+                    No detections yet...
+                </div>
+            </div>
+        </div>
+
+        <!-- YOLO Self-Learning -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">🧠 YOLO Self-Learning</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Status</div>
+                    <div class="metric-value" id="yolo-learning-status" style="font-size: 1.2em;">Loading...</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Labels Created</div>
+                    <div class="metric-value" id="yolo-labels-total">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Positive Labels</div>
+                    <div class="metric-value" id="yolo-labels-positive" style="color: #00ff88;">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Training Runs</div>
+                    <div class="metric-value" id="yolo-training-runs">0</div>
+                </div>
+            </div>
+            <div id="yolo-training-indicator" style="margin-top: 10px; padding: 8px; background: rgba(0, 212, 255, 0.1); border-radius: 8px; display: none;">
+                <div style="color: #00ff88; font-weight: bold;">🔄 YOLO Self-Training in Progress...</div>
+                <div style="font-size: 0.85em; color: #888; margin-top: 5px;">Model is improving from rewards</div>
+            </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Detection-Reward Pairs</div>
+                <div class="metric-value" id="yolo-pairs">0</div>
+                <div style="margin-top: 10px; font-size: 0.9em; color: #888;">
+                    <div>Self-labeled Data: <span id="yolo-self-data">0</span></div>
+                    <div style="margin-top: 5px;">Model builds itself from rewards!</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Detection Reward History</div>
+                <div id="yolo-reward-history" style="font-size: 0.85em; color: #888; margin-top: 5px; max-height: 100px; overflow-y: auto;">
+                    No reward data yet...
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Confidence Adjustments</div>
+                <div id="yolo-confidence-adjustments" style="font-size: 0.85em; color: #888; margin-top: 5px; max-height: 100px; overflow-y: auto;">
+                    No adjustments yet...
+                </div>
+            </div>
+        </div>
+
+        <!-- Episode History -->
+        <div class="card card-large">
+            <div class="card-header">
+                <div class="card-title">Episode History</div>
+            </div>
+            <div class="episode-list" id="episode-list">
+                <div style="text-align: center; color: #666; padding: 20px;">
+                    No episodes yet...
+                </div>
+            </div>
+        </div>
+
+        <!-- Errors & Warnings -->
+        <div class="card card-large">
+            <div class="card-header">
+                <div class="card-title">Errors & Warnings</div>
+            </div>
+            <div class="log-container" id="log-container">
+                <div style="text-align: center; color: #666; padding: 20px;">
+                    No errors or warnings...
+                </div>
+            </div>
+        </div>
+
+        <!-- Human Action Recording -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">🎥 Human Action Recording</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Recording Status</div>
+                    <div class="metric-value" id="recording-status" style="font-size: 1.2em;">STOPPED</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Total Actions</div>
+                    <div class="metric-value" id="recording-total">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Current Session</div>
+                    <div class="metric-value" id="recording-session">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Expert Buffer</div>
+                    <div class="metric-value" id="recording-buffer">0</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Session Duration</div>
+                <div class="metric-value" id="recording-duration">0<span class="metric-unit">s</span></div>
+                <div style="margin-top: 10px; font-size: 0.9em; color: #888;">
+                    <div>Mouse Movements: <span id="recording-mouse">0</span></div>
+                    <div>Button Presses: <span id="recording-buttons">0</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Game Status -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">🎮 Game Status</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Process Status</div>
+                    <div class="metric-value" id="game-status" style="font-size: 1.2em;">Checking...</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Process Name</div>
+                    <div class="metric-value" id="game-process-name" style="font-size: 0.9em;">Unknown</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Memory Access</div>
+                    <div class="metric-value" id="game-memory-access" style="font-size: 1.2em;">No</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Attached</div>
+                    <div class="metric-value" id="game-attached" style="font-size: 1.2em;">No</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0, 212, 255, 0.05); border-radius: 8px;">
+                <div class="metric-label">Current Game State</div>
+                <div id="game-state-display" style="font-size: 0.85em; color: #888; margin-top: 5px; max-height: 150px; overflow-y: auto;">
+                    Loading game state...
+                </div>
+            </div>
+        </div>
+
+        <!-- LLM Communication removed -->
+
+        <!-- Real-time Stats -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Real-time Statistics</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-label">Runtime</div>
+                    <div class="metric-value" id="runtime-value">0<span class="metric-unit">s</span></div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Frames Processed</div>
+                    <div class="metric-value" id="frames-value">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Total Errors</div>
+                    <div class="metric-value" id="errors-total">0</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Total Warnings</div>
+                    <div class="metric-value" id="warnings-total">0</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Charts
+        let fpsChart, systemChart, learningChart;
+        
+        function initCharts() {
+            const fpsCtx = document.getElementById('fps-chart').getContext('2d');
+            fpsChart = new Chart(fpsCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'FPS',
+                        data: [],
+                        borderColor: '#00d4ff',
+                        backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#2a2a3e' } },
+                        x: { grid: { color: '#2a2a3e' } }
+                    }
+                }
+            });
+
+            const systemCtx = document.getElementById('system-chart').getContext('2d');
+            systemChart = new Chart(systemCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'CPU %',
+                            data: [],
+                            borderColor: '#00d4ff',
+                            backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Memory MB',
+                            data: [],
+                            borderColor: '#00ff88',
+                            backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#2a2a3e' } },
+                        y1: { position: 'right', beginAtZero: true, grid: { display: false } },
+                        x: { grid: { color: '#2a2a3e' } }
+                    }
+                }
+            });
+
+            const learningCtx = document.getElementById('learning-chart').getContext('2d');
+            learningChart = new Chart(learningCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Loss',
+                            data: [],
+                            borderColor: '#ff5050',
+                            backgroundColor: 'rgba(255, 50, 50, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Reward',
+                            data: [],
+                            borderColor: '#00ff88',
+                            backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#2a2a3e' } },
+                        y1: { position: 'right', grid: { display: false } },
+                        x: { grid: { color: '#2a2a3e' } }
+                    }
+                }
+            });
+        }
+
+        // Update functions
+        function updateDashboard() {
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    updateMetrics(data);
+                    updateCharts(data);
+                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                    document.getElementById('refresh-indicator').classList.add('active');
+                    setTimeout(() => document.getElementById('refresh-indicator').classList.remove('active'), 500);
+                })
+                .catch(e => console.error('Update error:', e));
+        }
+
+        function updateMetrics(data) {
+            // Performance
+            if (data.fps) {
+                document.getElementById('fps-value').textContent = data.fps.current.toFixed(1);
+                document.getElementById('metric-fps').innerHTML = data.fps.current.toFixed(1) + '<span class="metric-unit">fps</span>';
+            }
+            
+            if (data.latencies_ms) {
+                document.getElementById('metric-capture').innerHTML = data.latencies_ms.capture.avg.toFixed(2) + '<span class="metric-unit">ms</span>';
+                document.getElementById('metric-inference').innerHTML = data.latencies_ms.inference.avg.toFixed(2) + '<span class="metric-unit">ms</span>';
+                document.getElementById('metric-injection').innerHTML = data.latencies_ms.injection.avg.toFixed(2) + '<span class="metric-unit">ms</span>';
+                // Qwen latency display removed
+            }
+
+            // System
+            if (data.system) {
+                const cpu = data.system.cpu_percent?.current || 0;
+                document.getElementById('cpu-value').innerHTML = cpu.toFixed(1) + '<span class="metric-unit">%</span>';
+                document.getElementById('cpu-progress').style.width = cpu + '%';
+
+                const memory = data.system.memory_mb?.current || 0;
+                document.getElementById('memory-value').innerHTML = memory.toFixed(0) + '<span class="metric-unit">MB</span>';
+                document.getElementById('memory-progress').style.width = Math.min(100, (memory / 16384) * 100) + '%';
+
+                if (data.system.gpu_memory_mb) {
+                    const gpu = data.system.gpu_memory_mb.current || 0;
+                    document.getElementById('gpu-value').innerHTML = gpu.toFixed(0) + '<span class="metric-unit">MB</span>';
+                    document.getElementById('gpu-progress').style.width = Math.min(100, (gpu / 8192) * 100) + '%';
+                }
+            }
+
+            // Learning
+            if (data.training) {
+                document.getElementById('loss-value').textContent = data.training.loss.current.toFixed(4);
+            }
+            if (data.rewards) {
+                document.getElementById('reward-value').textContent = data.rewards.current.toFixed(2);
+            }
+            if (data.episodes) {
+                document.getElementById('avg-reward-value').textContent = data.episodes.average_reward.toFixed(2);
+            }
+            if (data.total_training_steps) {
+                document.getElementById('steps-value').textContent = data.total_training_steps.toLocaleString();
+            }
+
+            // Input
+            if (data.input_mux) {
+                document.getElementById('control-mode').textContent = data.input_mux.mode.toUpperCase();
+                document.getElementById('mode-value').textContent = data.input_mux.mode.toUpperCase();
+                document.getElementById('injections-value').textContent = data.input_mux.bot_injections.toLocaleString();
+                document.getElementById('overrides-value').textContent = data.input_mux.human_overrides.toLocaleString();
+                document.getElementById('switches-value').textContent = data.input_mux.mode_switches.toLocaleString();
+                const safetyLock = document.getElementById('safety-lock');
+                if (data.input_mux.safety_locked) {
+                    safetyLock.textContent = 'ENABLED';
+                    safetyLock.style.color = '#ff5050';
+                } else {
+                    safetyLock.textContent = 'DISABLED';
+                    safetyLock.style.color = '#00ff88';
+                }
+            }
+
+            // Kill switch
+            if (data.kill_switch) {
+                document.getElementById('kill-hotkey').textContent = data.kill_switch.hotkey;
+                document.getElementById('kill-count').textContent = data.kill_switch.kill_count;
+                if (data.kill_switch.killed) {
+                    document.getElementById('kill-button').classList.add('activated');
+                    document.getElementById('kill-button').textContent = '✅ KILLED';
+                }
+            }
+
+            // Stats
+            if (data.runtime_seconds) {
+                document.getElementById('runtime-value').innerHTML = Math.floor(data.runtime_seconds) + '<span class="metric-unit">s</span>';
+            }
+            if (data.frame_count) {
+                document.getElementById('frames-value').textContent = data.frame_count.toLocaleString();
+            }
+            if (data.episode_count) {
+                document.getElementById('episodes-value').textContent = data.episode_count;
+            }
+            if (data.errors) {
+                document.getElementById('errors-total').textContent = data.errors.total;
+            }
+            if (data.warnings) {
+                document.getElementById('warnings-total').textContent = data.warnings.total;
+            }
+
+            // Status
+            const statusItem = document.getElementById('status-running');
+            if (data.status === 'running') {
+                statusItem.classList.add('active');
+                document.getElementById('status-text').textContent = 'RUNNING';
+            } else {
+                statusItem.classList.remove('active');
+                document.getElementById('status-text').textContent = 'STOPPED';
+            }
+        }
+
+        function updateCharts(data) {
+            const now = new Date().toLocaleTimeString();
+            
+            // FPS Chart
+            if (data.fps && fpsChart) {
+                fpsChart.data.labels.push(now);
+                fpsChart.data.datasets[0].data.push(data.fps.current);
+                if (fpsChart.data.labels.length > 50) {
+                    fpsChart.data.labels.shift();
+                    fpsChart.data.datasets[0].data.shift();
+                }
+                fpsChart.update('none');
+            }
+
+            // System Chart
+            if (data.system && systemChart) {
+                systemChart.data.labels.push(now);
+                systemChart.data.datasets[0].data.push(data.system.cpu_percent?.current || 0);
+                systemChart.data.datasets[1].data.push(data.system.memory_mb?.current || 0);
+                if (systemChart.data.labels.length > 50) {
+                    systemChart.data.labels.shift();
+                    systemChart.data.datasets[0].data.shift();
+                    systemChart.data.datasets[1].data.shift();
+                }
+                systemChart.update('none');
+            }
+        }
+
+        function loadEpisodes() {
+            fetch('/api/episodes')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('episode-list');
+                    if (data.recent_episodes && data.recent_episodes.length > 0) {
+                        container.innerHTML = data.recent_episodes.slice().reverse().map(ep => `
+                            <div class="episode-item ${ep.outcome}">
+                                <strong>Episode ${ep.start_time ? '#' + Math.floor(ep.start_time) : ''}</strong>
+                                <div style="margin-top: 5px; color: #888;">
+                                    Duration: ${ep.duration?.toFixed(1) || 0}s | 
+                                    Reward: ${ep.episode_reward?.toFixed(2) || 0} | 
+                                    Outcome: ${ep.outcome || 'unknown'}
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                });
+        }
+
+        function loadTrainingProgress() {
+            fetch('/api/training')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.enabled) {
+                        document.getElementById('training-updates').textContent = data.update_count.toLocaleString();
+                        document.getElementById('training-avg-loss').textContent = data.avg_loss.toFixed(4);
+                        document.getElementById('training-bc-loss').textContent = data.avg_bc_loss.toFixed(4);
+                        
+                        const trendEl = document.getElementById('training-trend');
+                        trendEl.textContent = data.trend.toUpperCase();
+                        if (data.trend === 'improving') {
+                            trendEl.style.color = '#00ff88';
+                        } else if (data.trend === 'degrading') {
+                            trendEl.style.color = '#ff5050';
+                        } else {
+                            trendEl.style.color = '#00d4ff';
+                        }
+                        
+                        const ratio = (data.human_action_ratio * 100).toFixed(1);
+                        document.getElementById('training-human-ratio').textContent = ratio + '%';
+                        document.getElementById('training-human-progress').style.width = ratio + '%';
+                        
+                        document.getElementById('training-beta').textContent = data.beta_bc.toFixed(3);
+                    } else {
+                        document.getElementById('training-trend').textContent = 'DISABLED';
+                        document.getElementById('training-trend').style.color = '#888';
+                    }
+                })
+                .catch(e => console.error('Training progress update error:', e));
+        }
+
+        function loadHumanRecording() {
+            fetch('/api/human_recording')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.enabled) {
+                        const statusEl = document.getElementById('recording-status');
+                        if (data.recording) {
+                            statusEl.textContent = 'RECORDING';
+                            statusEl.style.color = '#00ff88';
+                        } else {
+                            statusEl.textContent = 'STOPPED';
+                            statusEl.style.color = '#888';
+                        }
+                        
+                        document.getElementById('recording-total').textContent = data.total_actions.toLocaleString();
+                        document.getElementById('recording-session').textContent = data.current_session_actions.toLocaleString();
+                        document.getElementById('recording-buffer').textContent = data.expert_buffer_size.toLocaleString();
+                        document.getElementById('recording-duration').innerHTML = 
+                            Math.floor(data.current_session_duration) + '<span class="metric-unit">s</span>';
+                        document.getElementById('recording-mouse').textContent = data.mouse_movements || 0;
+                        document.getElementById('recording-buttons').textContent = data.button_presses || 0;
+                    } else {
+                        document.getElementById('recording-status').textContent = 'DISABLED';
+                        document.getElementById('recording-status').style.color = '#888';
+                    }
+                })
+                .catch(e => console.error('Human recording update error:', e));
+        }
+
+        function loadGameStatus() {
+            fetch('/api/game_status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.enabled) {
+                        const statusEl = document.getElementById('game-status');
+                        if (data.is_running) {
+                            statusEl.textContent = 'RUNNING';
+                            statusEl.style.color = '#00ff88';
+                        } else {
+                            statusEl.textContent = 'NOT RUNNING';
+                            statusEl.style.color = '#ff5050';
+                        }
+                        
+                        document.getElementById('game-process-name').textContent = data.process_name || 'Unknown';
+                        
+                        const memoryEl = document.getElementById('game-memory-access');
+                        if (data.has_memory_access) {
+                            memoryEl.textContent = 'YES';
+                            memoryEl.style.color = '#00ff88';
+                        } else {
+                            memoryEl.textContent = 'NO';
+                            memoryEl.style.color = '#ff5050';
+                        }
+                        
+                        const attachedEl = document.getElementById('game-attached');
+                        if (data.is_attached) {
+                            attachedEl.textContent = 'YES';
+                            attachedEl.style.color = '#00ff88';
+                        } else {
+                            attachedEl.textContent = 'NO';
+                            attachedEl.style.color = '#ff5050';
+                        }
+                        
+                        // Display game state
+                        const stateEl = document.getElementById('game-state-display');
+                        if (data.current_game_state) {
+                            const state = data.current_game_state;
+                            stateEl.innerHTML = `
+                                <div>Health: <strong>${state.health?.toFixed(1) || 0}/100</strong></div>
+                                <div>Stamina: <strong>${state.stamina?.toFixed(1) || 0}/100</strong></div>
+                                <div>Enemy Health: <strong>${state.enemy_health?.toFixed(1) || 0}/100</strong></div>
+                                <div>Is Dead: <strong>${state.is_dead ? 'YES' : 'NO'}</strong></div>
+                                <div>Enemy Dead: <strong>${state.enemy_dead ? 'YES' : 'NO'}</strong></div>
+                                <div>Combat State: <strong>${state.combat_state || 'unknown'}</strong></div>
+                            `;
+                        } else {
+                            stateEl.textContent = 'No game state data available';
+                        }
+                    } else {
+                        document.getElementById('game-status').textContent = 'DISABLED';
+                        document.getElementById('game-status').style.color = '#888';
+                    }
+                })
+                .catch(e => console.error('Game status update error:', e));
+        }
+
+        // LLM communication function removed
+
+        function loadYOLOSelfLearning() {
+            fetch('/api/yolo_self_learning')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.enabled) {
+                        const statusEl = document.getElementById('yolo-learning-status');
+                        statusEl.textContent = 'ACTIVE';
+                        statusEl.style.color = '#00ff88';
+                        
+                        document.getElementById('yolo-labels-total').textContent = data.total_labels_created.toLocaleString();
+                        document.getElementById('yolo-labels-positive').textContent = data.positive_labels.toLocaleString();
+                        const trainingRuns = data.training_count || 0;
+                        document.getElementById('yolo-training-runs').textContent = trainingRuns;
+                        document.getElementById('yolo-pairs').textContent = data.action_detection_pairs.toLocaleString();
+                        document.getElementById('yolo-self-data').textContent = data.self_labeled_data.toLocaleString();
+                        
+                        // Show training indicator if training is happening
+                        const trainingIndicator = document.getElementById('yolo-training-indicator');
+                        if (trainingRuns > 0 && data.self_labeled_data > 0) {
+                            trainingIndicator.style.display = 'block';
+                        } else {
+                            trainingIndicator.style.display = 'none';
+                        }
+                        
+                        // Display reward history
+                        const rewardHistoryEl = document.getElementById('yolo-reward-history');
+                        if (data.detection_rewards && Object.keys(data.detection_rewards).length > 0) {
+                            const rewards = Object.entries(data.detection_rewards)
+                                .map(([class_name, avg_reward]) => {
+                                    const color = avg_reward > 0 ? '#00ff88' : avg_reward < 0 ? '#ff5050' : '#888';
+                                    return `<div style="color: ${color};">${class_name}: ${avg_reward.toFixed(3)}</div>`;
+                                })
+                                .join('');
+                            rewardHistoryEl.innerHTML = rewards || 'No reward data yet...';
+                        } else {
+                            rewardHistoryEl.textContent = 'No reward data yet...';
+                        }
+                        
+                        // Display confidence adjustments
+                        const confAdjustEl = document.getElementById('yolo-confidence-adjustments');
+                        if (data.confidence_adjustments && Object.keys(data.confidence_adjustments).length > 0) {
+                            const adjustments = Object.entries(data.confidence_adjustments)
+                                .map(([class_name, adjustment]) => {
+                                    const color = adjustment > 0 ? '#00ff88' : adjustment < 0 ? '#ff5050' : '#888';
+                                    const sign = adjustment > 0 ? '+' : '';
+                                    return `<div style="color: ${color};">${class_name}: ${sign}${(adjustment * 100).toFixed(1)}%</div>`;
+                                })
+                                .join('');
+                            confAdjustEl.innerHTML = adjustments || 'No adjustments yet...';
+                        } else {
+                            confAdjustEl.textContent = 'No adjustments yet...';
+                        }
+                    } else {
+                        document.getElementById('yolo-learning-status').textContent = 'DISABLED';
+                        document.getElementById('yolo-learning-status').style.color = '#888';
+                    }
+                })
+                .catch(e => console.error('YOLO self-learning update error:', e));
+        }
+
+        function loadYOLO() {
+            fetch('/api/yolo')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.enabled) {
+                        document.getElementById('yolo-status').textContent = 'ACTIVE';
+                        document.getElementById('yolo-status').style.color = '#00ff88';
+                        document.getElementById('yolo-count').textContent = data.detection_count || 0;
+                        document.getElementById('yolo-enemies').textContent = data.enemy_count || 0;
+                        document.getElementById('yolo-threat').textContent = data.threat_level.toUpperCase();
+                        
+                        // Set threat level color
+                        const threatEl = document.getElementById('yolo-threat');
+                        if (data.threat_level === 'high') {
+                            threatEl.style.color = '#ff5050';
+                        } else if (data.threat_level === 'medium') {
+                            threatEl.style.color = '#ffc800';
+                        } else {
+                            threatEl.style.color = '#00ff88';
+                        }
+                        
+                        if (data.stats) {
+                            document.getElementById('yolo-inference').innerHTML = 
+                                (data.stats.avg_inference_time_ms || 0).toFixed(2) + '<span class="metric-unit">ms</span>';
+                        }
+                        
+                        // Show latest detections
+                        const detectionsEl = document.getElementById('yolo-detections');
+                        if (data.latest_detections && data.latest_detections.objects) {
+                            const objs = data.latest_detections.objects.slice(0, 5);
+                            if (objs.length > 0) {
+                                detectionsEl.innerHTML = objs.map(obj => 
+                                    `${obj.class_name} (${(obj.confidence * 100).toFixed(0)}%)`
+                                ).join(', ');
+                            } else {
+                                detectionsEl.textContent = 'No objects detected';
+                            }
+                        }
+                    } else {
+                        document.getElementById('yolo-status').textContent = 'DISABLED';
+                        document.getElementById('yolo-status').style.color = '#888';
+                    }
+                })
+                .catch(e => console.error('YOLO update error:', e));
+        }
+
+        function loadLogs() {
+            fetch('/api/errors')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('log-container');
+                    const entries = [];
+                    
+                    if (data.errors?.recent) {
+                        data.errors.recent.forEach(e => {
+                            entries.push({
+                                time: e.timestamp,
+                                type: 'error',
+                                message: `${e.error_type}: ${e.error_message}`,
+                                context: e.context
+                            });
+                        });
+                    }
+                    
+                    if (data.warnings?.recent) {
+                        data.warnings.recent.forEach(w => {
+                            entries.push({
+                                time: w.timestamp,
+                                type: 'warning',
+                                message: w.warning,
+                                context: w.context
+                            });
+                        });
+                    }
+                    
+                    if (entries.length > 0) {
+                        container.innerHTML = entries.slice().reverse().map(entry => `
+                            <div class="log-entry ${entry.type}">
+                                <span class="log-time">${new Date(entry.time).toLocaleTimeString()}</span>
+                                <strong>[${entry.type.toUpperCase()}]</strong> ${entry.message}
+                                ${entry.context ? `<div style="margin-left: 20px; color: #666;">${entry.context}</div>` : ''}
+                            </div>
+                        `).join('');
+                    }
+                });
+        }
+
+        function triggerKillSwitch() {
+            if (confirm('Are you sure you want to activate the kill switch? This will immediately stop the bot.')) {
+                fetch('/api/kill_switch', { method: 'POST' })
+                    .then(() => {
+                        document.getElementById('kill-button').classList.add('activated');
+                        document.getElementById('kill-button').textContent = '✅ KILLED';
+                    })
+                    .catch(e => alert('Error triggering kill switch: ' + e));
+            }
+        }
+
+        // Initialize
+        initCharts();
+        updateDashboard();
+        loadEpisodes();
+        loadLogs();
+
+        // Auto-refresh
+        setInterval(updateDashboard, 1000); // Update every second
+        setInterval(loadEpisodes, 5000); // Update episodes every 5 seconds
+        setInterval(loadLogs, 5000); // Update logs every 5 seconds
+        setInterval(loadYOLO, 1000); // Update YOLO every second
+        setInterval(loadHumanRecording, 1000); // Update human recording every second
+        setInterval(loadTrainingProgress, 1000); // Update training progress every second
+        setInterval(loadYOLOSelfLearning, 2000); // Update YOLO self-learning every 2 seconds
+        setInterval(loadGameStatus, 2000); // Update game status every 2 seconds
+        // LLM communication interval removed
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,402 @@
+﻿Autonomous Agent Development for High-Fidelity Physics Simulations: A Human-in-the-Loop Architecture for Half Sword
+
+
+
+
+1. Introduction and Architectural Overview
+
+
+The development of autonomous agents for video games has traditionally relied on discrete action spaces and accessible state representations, typically found in genres such as strategy games or platformers. However, the emergence of physics-based combat simulators, specifically High Fidelity Medieval Combat simulators like Half Sword, presents a paradigm shift in the requirements for artificial intelligence control systems. Unlike traditional role-playing games where combat is abstracted into dice rolls or animation loops triggered by single button presses, Half Sword operates on a continuous physics interaction model. In this environment, the mouse input is not merely a cursor position but a direct mapping to the kinetic energy, angular velocity, and edge alignment of a weapon in three-dimensional space.1 Consequently, the control problem transitions from a high-level decision-making task to a low-level robotic manipulation task, requiring continuous control policies that can adapt to the chaotic determinism of a "ragdoll" physics engine.
+This report details the architectural design, theoretical basis, and implementation strategy for a "Human-in-the-Loop" (HITL) autonomous agent designed specifically for Half Sword. The core objective is to create a system that not only learns to play the game through trial and error but allows for seamless, real-time human intervention. This intervention must serve a dual purpose: immediate corrective control to salvage a failing run, and simultaneous data generation to update the agent’s policy network via Imitation Learning (IL). This requirement necessitates a hybrid learning architecture that combines the stability of Imitation Learning—specifically Dataset Aggregation (DAgger)—with the exploratory capabilities of Reinforcement Learning (RL), such as Proximal Policy Optimization (PPO).3
+The proposed system addresses the unique constraints of the Half Sword application, including the necessity for high-frequency input injection, the ambiguity of visual death indicators, and the requirement for automated menu navigation to facilitate continuous training loops. By leveraging kernel-level input interception, direct memory access (DMA) for ground-truth state verification, and asynchronous multiprocessing for online training, this architecture provides a robust framework for training an agent that evolves from a clumsy novice to a precision duelist, guided by the intuition of its human pilot.
+
+
+1.1 The Operational Domain: Half Sword Mechanics
+
+
+To design an effective agent, one must first characterize the environment's dynamics. Half Sword is a physics-based simulator where the character is essentially an active ragdoll.5 The game simulates historical XV-century arms and armor, calculating damage based on velocity, impact angle, and material properties (e.g., blade vs. plate armor) rather than abstract health points.6
+The control scheme is coupled and continuous. The mouse controls both the camera view and the weapon's position. This coupling introduces a significant challenge: to swing a sword from right to left, the agent must move the mouse left, which simultaneously rotates the view left. Successful combat requires compensating for this camera rotation while maintaining the weapon's trajectory, a maneuver known in the community as "dragging" or "accel/decel".1 Furthermore, the game features distinct "stances" triggered by auxiliary inputs, such as the "Half-Sword" mode (holding the blade for precision thrusts) activated by the Right Mouse Button (RMB), and alternative thrust alignments via the Alt key.1
+The implication for agent design is that the Action Space cannot be discrete. The agent must output a continuous vector of $(\Delta x, \Delta y)$ values to drive the mouse, alongside discrete signals for stance toggling and grappling. This hybrid action space demands a neural architecture capable of multimodal outputs, synchronizing continuous motor control with discrete tactical decisions.9
+
+
+1.2 The Human-in-the-Loop Requirement
+
+
+The user's requirement for "immediate incorporation" of human movement dictates a departure from standard offline training pipelines. In a traditional workflow, data is collected, the model is trained for hours, and then deployed. Here, the system must function as an "online learner." When the human detects the agent failing—for example, getting stuck in a grapple or misjudging a spear's reach—the human physically takes control of the mouse.
+This handover presents two critical engineering challenges. First, the Input Conflict Problem: if the agent and human send contradictory signals simultaneously, the operating system sums the vectors, resulting in erratic, jittery movement that serves neither.11 Second, the Covariate Shift Problem: an agent trained only on expert human data may drift into states the expert never visited (e.g., falling over), panic, and fail because it lacks recovery data. The proposed architecture solves the first via a kernel-level driver multiplexer and the second via the DAgger algorithm, which systematically aggregates data from these failure states labeled with the expert's corrective actions.3
+
+
+2. Perception Layer: High-Fidelity State Acquisition
+
+
+An autonomous agent is only as effective as its perception of the environment. In the high-velocity combat of Half Sword, where a reaction delay of milliseconds can result in a fatal hit, the perception layer must prioritize low latency and state truth. Visual analysis alone is insufficient due to the potential for occlusion (blood, particle effects) and the ambiguity of the game's minimal Heads-Up Display (HUD). Therefore, a dual-modal perception system is required, combining high-speed computer vision for spatial awareness with direct memory access for status verification.
+
+
+2.1 Visual Capture: The Latency Bottleneck
+
+
+Standard Python screen capture libraries, such as PIL.ImageGrab or mss, rely on CPU-bound operations to copy the framebuffer from the GPU to system RAM. In a machine learning pipeline, this transfer introduces significant latency, often capping capture rates below 60Hz and consuming CPU cycles needed for inference. For a physics-based reaction bot, this is unacceptable.
+The superior solution is DXCam, a library optimized for Windows DirectX applications. DXCam interfaces directly with the Windows Desktop Duplication API (DDA), a low-level API introduced in Windows 8 that allows for the efficient mirroring of the display output.12 By accessing the GPU's back buffer directly, DXCam bypasses the standard GDI (Graphics Device Interface) overhead.
+
+
+Technical Implementation of DXCam
+
+
+The implementation of DXCam allows for the captured frames to be piped directly into a NumPy array, which serves as the bridge to the PyTorch inference engine. Benchmarks indicate that DXCam can sustain capture rates exceeding 240Hz on modern hardware, providing a temporal resolution four times greater than standard 60Hz capture methods.12 This high-frequency sampling is critical for detecting the "telegraphing" of enemy attacks—subtle shifts in the opponent's shoulder or foot position that precede a strike.
+The visual pipeline should be configured to capture a region of interest (ROI) centered on the screen, typically $84 \times 84$ or $96 \times 96$ pixels. While Half Sword is a visually detailed game, the neural network does not require 4K resolution to understand physics. Downscaling the image reduces the input tensor size, significantly accelerating the forward pass of the Convolutional Neural Network (CNN) without sacrificing the spatial information required to determine the relative position of the enemy's weapon.14
+
+
+2.2 Direct Memory Access: The Source of Truth
+
+
+While vision provides the "where," memory provides the "what." User reports and research snippets highlight that visual indicators of death and damage in Half Sword are inconsistent. The screen may go black, or the camera may simply detach into a "ragdoll cam," making it difficult for a vision-only system to distinguish between being knocked down (recoverable) and being killed (terminal).15 Furthermore, the user requirement to "recognize when it's performing well or poorly" implies a need for a reward signal. In a game without a health bar, extracting this signal visually is nearly impossible.
+Pymem acts as the solution to this opacity. It allows the Python agent to read the game's memory space directly, accessing the variables that the game engine uses to track state. By scanning for specific memory signatures or "pointers," the agent can retrieve floating-point values representing the player's health, limb integrity, and stamina.16
+
+
+Pointer Chains and UE5 Architecture
+
+
+Half Sword is built on Unreal Engine 5 (UE5). In UE5, game state is typically rooted in a global object known as GWorld (formerly UWorld). To read the player's health, the system must traverse a pointer chain:
+GWorld $\rightarrow$ GameInstance $\rightarrow$ LocalPlayers $\rightarrow$ PlayerController $\rightarrow$ AcknowledgedPawn $\rightarrow$ DamageHandler $\rightarrow$ Health.
+Research indicates that these offsets change with every game update. However, tools like UE4SS (Unreal Engine 4/5 Scripting System) and community-maintained "dump" sites (e.g., Dumpspace) provide automated lists of these offsets.17 By integrating a pointer scanner into the initialization routine, the bot can robustly locate the Health address regardless of dynamic memory allocation (ASLR).
+
+
+Defining the Reward Signal
+
+
+Using memory access, we can construct a dense reward function for the Reinforcement Learning component.
+* Health: The Health float provides a continuous measure of survival. A sudden drop indicates taking a hit (negative reward).
+* Bone Integrity: Snippets mention "Body Density" and "Bone Snapping" as internal variables.19 Monitoring the flags for broken limbs allows the agent to recognize "poor performance" even if the player is still alive (e.g., fighting with a broken arm is a suboptimal state).
+* Enemy State: Reading the enemy's health provides the positive reward signal. If the enemy's health drops or their "IsDead" flag becomes true, the agent receives a large positive reward, reinforcing the sequence of actions that led to the kill.20
+Feature
+	Visual Capture (DXCam)
+	Memory Read (Pymem)
+	Usage in Agent
+	Latency
+	Low (<5ms pipeline)
+	Near Zero (<1ms)
+	Vision: Input to Policy Network. Memory: Reward Calculation.
+	Reliability
+	Susceptible to lighting/blood
+	100% Deterministic
+	Vision: Spatial orientation. Memory: Death/Win detection.
+	Data Type
+	High-dimensional (Pixels)
+	Low-dimensional (Floats/Bools)
+	Vision: Feature extraction. Memory: State Machine triggers.
+	Anti-Cheat
+	Generally Safe (Passive)
+	Risky (Active Read)
+	Requires care; avoiding writing to memory during gameplay reduces risk.
+	
+
+3. Input Layer: Kernel-Level Control and Interception
+
+
+The most critical functional requirement of the user's request is the ability to "take over" control of the bot and have it learn from the human's "exact mouse movements." This implies a system where the human input overrides the bot input instantaneously and seamlessly. Standard automation libraries like pyautogui operate at the Windows API level, injecting events into the message queue. If a script moves the mouse $+10$ pixels on the X-axis while the human moves it $-10$ pixels, the operating system sums these to $0$, creating a "fighting" sensation where the cursor vibrates or drifts.11
+To achieve a true "override" mechanism, we must intercept the input lower in the stack, at the kernel level.
+
+
+3.1 The Interception Driver Architecture
+
+
+The Interception driver is a wrapper for the Windows kernel's input stack. It functions as a filter driver, sitting between the hardware driver (USB HID) and the operating system's input processing.22 This position allows it to "swallow" packets from the physical device, preventing them from reaching the OS, or to inject packets that appear indistinguishable from hardware events.
+The Python wrapper, pyinterception (or similar C++ bindings), allows us to construct a software multiplexer (Mux) that governs the flow of control.
+
+
+The Control Multiplexer (Mux) Logic
+
+
+The Mux operates as a state machine with two primary states: AUTONOMOUS and MANUAL.
+1. State: AUTONOMOUS (Bot Control)
+   * Logic: The driver blocks all packets originating from the physical mouse device ID. The OS sees no movement from the human hand.
+   * Injection: The neural network calculates an action vector $(\Delta x, \Delta y)$. The driver injects this vector into the input stream. The game engine receives this as a standard mouse event.
+   * Transition Condition: The Mux monitors the blocked physical packets. If the magnitude of the physical movement vector exceeds a noise threshold $\epsilon$ (e.g., intentional movement vs. sensor jitter), the system triggers an immediate state transition to MANUAL.
+2. State: MANUAL (Human Control / Data Collection)
+   * Logic: The driver immediately unblocks the physical device, allowing human inputs to pass through to the game. Simultaneously, it ceases the injection of neural network outputs.
+   * Learning Trigger: This state represents a "correction." The system begins logging the sequence of game states (frames) and the corresponding human actions (mouse deltas) into a high-priority "Expert Buffer." This data is flagged for immediate training.
+   * Transition Condition: If the physical input remains below the noise threshold $\epsilon$ for a duration $t$ (e.g., 0.5 seconds), the system infers that the human has relinquished control and transitions back to AUTONOMOUS.
+
+
+3.2 Handling Continuous Action Spaces
+
+
+In Half Sword, the mouse is a continuous controller. The agent must output continuous values, not discrete clicks. The Action Space is defined as $A = \{v_x, v_y, c_{left}, c_{right}, c_{space}, c_{alt}\}$.
+* $v_x, v_y$: Continuous values in the range $[-1, 1]$. These are scaled by a sensitivity factor to match the game's expected input range (e.g., multiplied by 100 pixels per frame).
+* $c_{...}$: Discrete values representing binary button states.
+A critical challenge in Half Sword is the "Deadzone" or "Passive Parry Zone." Research indicates that small movements reorient the blade without swinging, while large movements trigger strikes.1 The "exact movement" requirement means the bot must learn the specific velocity curves the human uses to break this deadzone. By capturing the raw counts from the Interception driver, the system preserves the nuances of the human's acceleration—data that would be lost if using a high-level API that only reports cursor position.24
+
+
+3.3 Safety and Anti-Cheat Considerations
+
+
+Using kernel drivers carries risks. While the Interception driver is a legitimate tool often used for accessibility, it is functionally similar to malware (keyloggers) or cheats.
+* Secure Boot: Windows 11's strict Secure Boot policies may block unsigned drivers. The Interception driver is generally signed, but OEM-specific implementations may require disabling Secure Boot or enabling "Test Mode" to load the driver, which is a necessary trade-off for this level of control.25
+* Game Detection: Half Sword is currently in playtest and may not have aggressive anti-cheat like BattlEye. However, utilizing the LLKHF_INJECTED flag filter is good practice. The Interception driver does not set this flag, making the bot's input appear as generic hardware input to the OS, circumventing basic heuristics that look for simulated keys.23
+
+
+4. Learning Architecture: Asynchronous DAgger and PPO
+
+
+The core intelligence of the agent relies on a hybrid approach combining Imitation Learning (IL) and Reinforcement Learning (RL). The user's request for "immediate incorporation" of feedback mandates an Online Learning setup, where training and inference happen concurrently.
+
+
+4.1 The DAgger Algorithm (Dataset Aggregation)
+
+
+Standard Behavioral Cloning (BC)—training a bot on a static dataset of human gameplay—suffers from Covariate Shift. The bot will inevitably make a small error, drifting into a state (e.g., blade tangled in an enemy's legs) that was never present in the expert's clean gameplay. Lacking data for this state, the bot behaves randomly, compounding the error until failure.3
+DAgger addresses this by iteratively aggregating data.
+1. Execute: The bot plays the game using its current policy $\pi_{bot}$.
+2. Intervene: When the bot deviates or fails, the human takes over (via the Interception Mux).
+3. Aggregate: The system records the state $s$ and the human's corrective action $a^*$ during the intervention.
+4. Train: The policy is updated on the aggregate dataset $D \cup \{(s, a^*)\}$.
+This loop ensures the bot is trained specifically on the states it finds difficult, effectively "asking" the human for the solution to the problems it encounters.
+
+
+4.2 Proximal Policy Optimization (PPO)
+
+
+While DAgger teaches the bot how to move, RL teaches it what to achieve (Win). PPO is the industry standard for continuous control problems in robotics and gaming due to its stability and sample efficiency.4
+* Continuous Control: PPO outputs a probability distribution (Gaussian) for the mouse movement. During training, the agent samples from this distribution, allowing for exploration. As training progresses, the standard deviation narrows, and the agent's movements become more precise.
+* Advantage Estimation: PPO uses a value function $V(s)$ to estimate the expected reward. If the bot performs a move that leads to a "Bone Snap" on the enemy (detected via memory), the Advantage is positive, and the probability of that action is increased.
+
+
+4.3 The Asynchronous Actor-Learner Architecture
+
+
+To satisfy the "immediate" learning requirement, the system cannot pause to run a training epoch. We utilize PyTorch Multiprocessing to separate the agent into two distinct processes that communicate via shared memory.28
+
+
+Process 1: The Actor (Inference Loop)
+
+
+This process runs at the game's frame rate (e.g., 60 FPS).
+* Cycle: Capture Frame (DXCam) $\rightarrow$ Preprocess $\rightarrow$ Model Inference $\rightarrow$ Action Injection (Interception).
+* Model Sync: The Actor holds a reference to the model in shared memory. Because PyTorch tensors in shared memory are accessible across processes, the Actor automatically uses the latest weights as soon as the Learner updates them, with zero copy overhead.
+
+
+Process 2: The Learner (Training Loop)
+
+
+This process runs continuously in the background.
+* Cycle: Sample Batch from Replay Buffer $\rightarrow$ Calculate Loss $\rightarrow$ Backpropagate $\rightarrow$ Update Weights.
+* Prioritized Replay: The Replay Buffer is not a FIFO queue. It uses Prioritized Experience Replay (PER). Transitions marked as "Human Intervention" are given significantly higher sampling priority. This ensures that the optimizer focuses heavily on the corrections the human just made, satisfying the user's request to "incorporate that immediately".30
+
+
+The Hybrid Loss Function
+
+
+The optimizer minimizes a composite loss function:
+
+
+
+
+$$L_{total} = L_{PPO} + \beta L_{BC}$$
+* $L_{PPO}$: Maximizes the reward (Winning/Health).
+* $L_{BC}$: Minimizes the distance between the bot's output and the human's input (Imitation).
+* $\beta$: A scaling factor. In the early stages, $\beta$ is high (rely on human). As the bot improves, $\beta$ can be annealed, allowing the bot to discover strategies that might exceed human capability (e.g., reaction times faster than humanly possible).
+
+
+5. Automation and Infrastructure: The Loop Manager
+
+
+Training a bot requires thousands of episodes. Manual resetting is not feasible. The user explicitly requested the ability to "navigate menus to reset the game." Half Sword presents specific challenges here, including bugs where the game hangs on a black screen or fails to register clicks.32
+
+
+5.1 The Watchdog State Machine
+
+
+A robust "Watchdog" process monitors the game state via memory and visual OCR (Optical Character Recognition) to manage the lifecycle of a match.
+Game State
+	Detection Method
+	Action
+	Alive/Fighting
+	Memory: Health > 0
+	Continue Inference Loop.
+	Dead (Ragdoll)
+	Memory: Health <= 0
+	Wait 2.0s for physics to settle. Trigger Restart.
+	Win (Victory)
+	Memory: EnemyHealth <= 0
+	Log Win. Trigger Restart.
+	Menu Screen
+	Vision: Template Match "Start"
+	Execute Macro: Click "Start".
+	Black Screen Bug
+	Vision: Black Pixels > 95% AND Memory: InMatch
+	Force Process Kill (taskkill). Relaunch Game.
+	Falling (Abyss)
+	Memory: PlayerZ < -500
+	Trigger Restart immediately.
+	
+
+5.2 Automating the Restart
+
+
+There are three tiers of restart automation, ordered by reliability:
+1. Memory/Mod Injection (Highest Reliability): The most efficient method uses the HalfSwordTrainerMod. This mod exposes functions to spawn entities or reset the level. By inspecting the mod's source code (Lua), we can identify the memory hooks it uses. The bot can either simulate the mod's hotkeys (e.g., F5 to respawn) or use Pymem to call the ServerRestart function directly. This bypasses the UI entirely, reducing the reset time from ~10 seconds (UI navigation) to ~1 second.34
+2. Macro Navigation (Medium Reliability): If memory injection is blocked, the bot uses pydirectinput to navigate.
+   * Sequence: Press ESC $\rightarrow$ Wait 0.5s $\rightarrow$ Click "Menu" coordinates $\rightarrow$ Wait for Load $\rightarrow$ Click "Arena" $\rightarrow$ Click "Start".
+   * Robustness: Blind macros often fail if the game lags. The Watchdog must use visual confirmation (e.g., checking if the "Menu" button pixel color is present) before executing the next step in the macro chain.
+3. Process Recycling (Crash Recovery): Half Sword currently suffers from memory leaks that degrade performance over time.32 The Watchdog should monitor the system RAM usage. If HalfSword-Win64-Shipping.exe exceeds a threshold (e.g., 10GB), the Watchdog initiates a "Clean Slate" protocol: terminate the process, clear the standby memory list, and relaunch the game. This ensures the training session can run unattended overnight.
+
+
+6. Implementation Guide and Code Structure
+
+
+The implementation of this system is complex, requiring the integration of Python, C++ (for the driver), and reverse-engineering tools. The following outline describes the necessary components.
+
+
+6.1 Hardware and Software Requirements
+
+
+* GPU: NVIDIA RTX 30-series or higher. The system runs the game (UE5), the capture (DXCam), and the inference/training (PyTorch/CUDA) simultaneously. VRAM is the bottleneck. Ideally, a secondary GPU would handle the training, but a single high-end card can suffice with lower batch sizes.
+* OS: Windows 10/11.
+* Driver: Interception Driver (installed via install-interception.exe /install).
+* Python Libraries: torch, dxcam, pymem, pydirectinput, pyinterception, numpy, opencv-python.
+
+
+6.2 Code Module Breakdown
+
+
+
+
+Module 1: input_mux.py
+
+
+This module wraps pyinterception. It instantiates the Interception() context and runs a blocking loop on a separate thread. It exposes thread-safe methods set_mode(AUTO|MANUAL) and inject_action(x, y, buttons). It pushes human input data to a multiprocessing.Queue for the Learner.
+
+
+Module 2: memory_reader.py
+
+
+This module uses Pymem. It implements a scan_pattern() function to find the base address of GWorld using a hexadecimal signature (AOB scan). It exposes a get_state() method that returns a dictionary: {'health': float, 'stamina': float, 'is_dead': bool, 'enemy_health': float}. It handles exception logic if the pointer chain breaks (e.g., on level load).
+
+
+Module 3: agent_process.py (The Actor)
+
+
+This is the main loop.
+
+
+Python
+
+
+
+
+# Pseudo-code logic for the Actor Loop
+def actor_loop(shared_model, replay_buffer, state_lock):
+   camera = dxcam.create(device_idx=0, output_color="GRAY")
+   camera.start(target_fps=60)
+   
+   while True:
+       # 1. Perception
+       frame = camera.get_latest_frame() # Non-blocking
+       mem_state = memory_reader.get_state()
+       
+       # 2. Watchdog Check
+       if mem_state['is_dead'] or mem_state['game_over']:
+           perform_reset_routine()
+           continue
+
+       # 3. Model Inference
+       with torch.no_grad():
+           # Model is in shared memory, so updates from Learner are automatic
+           action_dist = shared_model(frame, mem_state)
+           
+       # 4. Input Mux Handling
+       if input_mux.is_human_active():
+           # Human is controlling.
+           # Record Human Action for DAgger
+           human_action = input_mux.get_last_human_input()
+           replay_buffer.push(state=frame, action=human_action, priority=HIGH)
+       else:
+           # Bot is controlling.
+           action = action_dist.sample()
+           input_mux.inject_action(action)
+           replay_buffer.push(state=frame, action=action, priority=LOW)
+
+
+
+Module 4: learner_process.py (The Learner)
+
+
+This runs purely on the GPU.
+
+
+Python
+
+
+
+
+# Pseudo-code logic for the Learner Loop
+def learner_loop(shared_model, replay_buffer):
+   optimizer = torch.optim.Adam(shared_model.parameters(), lr=1e-4)
+   
+   while True:
+       if len(replay_buffer) < BATCH_SIZE:
+           continue
+           
+       # Sample with Priority (Human corrections > Random bot play)
+       states, actions, rewards, priorities = replay_buffer.sample(BATCH_SIZE)
+       
+       # Calculate PPO Loss + BC Loss
+       # PPO: Maximize reward
+       # BC: Minimize distance(predicted_action, human_action)
+       loss = calc_hybrid_loss(shared_model, states, actions, rewards)
+       
+       optimizer.zero_grad()
+       loss.backward()
+       optimizer.step() # Updates shared_model weights immediately
+
+
+
+6.3 Performance Optimization
+
+
+To ensure the "immediate" feel, latency must be managed.
+* TensorRT: Compiling the PyTorch model to TensorRT can reduce inference time from ~10ms to ~2ms. This is highly recommended for Half Sword, where physics interactions happen frame-by-frame.
+* Frame Stacking: Instead of a single frame, the input should be a stack of the last 4 frames (Time, Height, Width). This allows the 3D Convolutional layers to infer velocity and acceleration—crucial for blocking an incoming swing.14
+
+
+7. Conclusion
+
+
+The development of a Half Sword bot capable of HITL learning represents a significant engineering challenge that pushes the boundaries of standard game automation. It requires moving beyond simple scripting into the realm of cyber-physical systems, where the "physics" of the game engine must be respected and manipulated with robotic precision.
+The proposed architecture—Kernel-Level Interception + Pymem State Verification + Asynchronous DAgger—directly addresses the user's requirements. It solves the input conflict via driver-level multiplexing, ensures reliable performance monitoring via memory introspection, and guarantees immediate learning incorporation via shared-memory multiprocessing. By automating the tedious menu navigation and death-recovery loops, the system transforms the user's role from a player into a "teacher," allowing for the rapid training of an agent that does not just play the game, but learns the art of the blade.
+Works cited
+1. Advanced Mouse Controls - Tutorial - Half Sword Playtest - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=3yCr8JNgbUM
+2. Neat concept, iffy execution. :: Half Sword General Discussions - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/4513255384649442114/
+3. [1810.02890] HG-DAgger: Interactive Imitation Learning with Human Experts - arXiv, accessed November 23, 2025, https://arxiv.org/abs/1810.02890
+4. Proximal Policy Optimization — Spinning Up documentation - OpenAI, accessed November 23, 2025, https://spinningup.openai.com/en/latest/algorithms/ppo.html
+5. Introduction to Ragdoll Physics - Electronics | HowStuffWorks, accessed November 23, 2025, https://electronics.howstuffworks.com/ragdoll-physics.htm
+6. How To Play Half-Sword (IMO) + Tips : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1i24tkm/how_to_play_halfsword_imo_tips/
+7. Made a simple introduction to game mechanics for beginners - hope it's helpful! - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1p1etba/made_a_simple_introduction_to_game_mechanics_for/
+8. What are the FULL game controls? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1k9ebol/what_are_the_full_game_controls/
+9. Need help creating an action space compatible with stable baselines - Reddit, accessed November 23, 2025, https://www.reddit.com/r/reinforcementlearning/comments/10djcbl/need_help_creating_an_action_space_compatible/
+10. Action Space Reduction Strategies for Reinforcement Learning in Autonomous Driving This work was supported in part by the National Science Foundation (NSF) under Grant MRI 2214830. - arXiv, accessed November 23, 2025, https://arxiv.org/html/2507.05251v1
+11. Seeking Python Library for Mouse Automation without Native Mouse Interaction - Reddit, accessed November 23, 2025, https://www.reddit.com/r/learnpython/comments/13v42db/seeking_python_library_for_mouse_automation/
+12. ra1nty/DXcam: A Python high-performance screen capture library for Windows using Desktop Duplication API - GitHub, accessed November 23, 2025, https://github.com/ra1nty/DXcam
+13. Playing Games with Python - by Steve Olsen - Medium, accessed November 23, 2025, https://medium.com/steveindusteves/playing-games-with-python-9be869f7b189
+14. Reinforcement Learning for Gaming | Full Python Course in 9 Hours - YouTube, accessed November 23, 2025, https://www.youtube.com/watch?v=dWmJ5CXSKdw
+15. Can we not get a black screen upon dying? I wanna see my character's death. : r/HalfSword, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1ip10g8/can_we_not_get_a_black_screen_upon_dying_i_wanna/
+16. API — Pymem alpha documentation, accessed November 23, 2025, https://pymem.readthedocs.io/en/latest/api.html
+17. Dumpers - UE4SS Documentation, accessed November 23, 2025, https://docs.ue4ss.com/feature-overview/dumpers.html
+18. Half Sword - Dumpspace, accessed November 23, 2025, https://dumpspace.spuckwaffel.com/Games/?hash=20937251
+19. Half Sword Settings | Explanation Requested - Steam Community, accessed November 23, 2025, https://steamcommunity.com/app/2397300/discussions/0/4754201033330644994/
+20. How the fuck do I beat this guy if he one shots me every single time and i cannot damage him at all???? : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1jqndsu/how_the_fuck_do_i_beat_this_guy_if_he_one_shots/
+21. Detecting Physical Mouse Movement with Python and Windows 10 Without Cursor Movement - Stack Overflow, accessed November 23, 2025, https://stackoverflow.com/questions/49847756/detecting-physical-mouse-movement-with-python-and-windows-10-without-cursor-move
+22. interception-python - PyPI, accessed November 23, 2025, https://pypi.org/project/interception-python/
+23. kennyhml/cppinterception: Modern C++ wrapper for the interception device driver - GitHub, accessed November 23, 2025, https://github.com/kennyhml/intercpption
+24. How can I get raw sensor data from a computer mouse, while preventing it from controlling the cursor? : r/learnprogramming - Reddit, accessed November 23, 2025, https://www.reddit.com/r/learnprogramming/comments/15l10l5/how_can_i_get_raw_sensor_data_from_a_computer/
+25. Windows 11 and Secure Boot - Microsoft Support, accessed November 23, 2025, https://support.microsoft.com/en-us/windows/windows-11-and-secure-boot-a8ff1202-c0d9-42f5-940f-843abef64fad
+26. Windows Secure Boot Key Creation and Management Guidance | Microsoft Learn, accessed November 23, 2025, https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-secure-boot-key-creation-and-management-guidance?view=windows-11
+27. Reinforcement Learning (PPO) with TorchRL Tutorial - PyTorch documentation, accessed November 23, 2025, https://docs.pytorch.org/tutorials/intermediate/reinforcement_ppo.html
+28. Leveraging Multiprocessing in PyTorch | by Ali ABUSALEH - Medium, accessed November 23, 2025, https://medium.com/@ali.abusaleh/leveraging-multiprocessing-in-pytorch-ce65b7e695ae
+29. How to Use PyTorch Multiprocessing? | by Hey Amit - Medium, accessed November 23, 2025, https://medium.com/@heyamit10/how-to-use-pytorch-multiprocessing-0ddd2014f4fd
+30. Prioritized Generative Replay - arXiv, accessed November 23, 2025, https://arxiv.org/html/2410.18082v1
+31. Prioritized Replay Buffer - really useful? : r/reinforcementlearning - Reddit, accessed November 23, 2025, https://www.reddit.com/r/reinforcementlearning/comments/18yozlt/prioritized_replay_buffer_really_useful/
+32. Going "to menu" uses up all my memory (In playtest) : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1f0bbgh/going_to_menu_uses_up_all_my_memory_in_playtest/
+33. Whenever I die as a peasant I go to black screen - HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/1kmj7dk/whenever_i_die_as_a_peasant_i_go_to_black_screen/
+34. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 23, 2025, https://github.com/massclown/HalfSwordTrainerMod
+35. Half Sword Trainer Mod : r/HalfSword - Reddit, accessed November 23, 2025, https://www.reddit.com/r/HalfSword/comments/19e1u65/half_sword_trainer_mod/

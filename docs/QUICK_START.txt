@@ -1,0 +1,86 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                    HALF SWORD AI AGENT - QUICK START                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+EASIEST WAY TO START (Windows):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Simply DOUBLE-CLICK:  start_agent.bat
+
+  That's it! No command line, no bash, no terminal needed.
+
+
+OTHER START OPTIONS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. start_agent.bat     - Windows batch file (RECOMMENDED)
+     → Double-click to run
+     → Shows clear error messages
+     → Handles everything automatically
+
+  2. start_agent.py      - Python launcher script
+     → Double-click if Python file associations are set up
+     → Or run: python start_agent.py
+
+  3. start_agent.ps1     - PowerShell script
+     → Right-click → "Run with PowerShell"
+     → Or run: powershell -ExecutionPolicy Bypass -File start_agent.ps1
+
+  4. start_agent.vbs     - Visual Basic Script
+     → Double-click to run silently (no console window)
+
+  5. Command Line        - Traditional method
+     → python main.py
+
+
+WHAT THE LAUNCHER DOES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ Checks if Python is installed
+  ✓ Verifies main.py exists
+  ✓ Changes to correct directory automatically
+  ✓ Shows clear error messages if something is wrong
+  ✓ Avoids all bash/terminal startup errors
+
+
+TROUBLESHOOTING:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Problem: "Python is not installed"
+  Solution: Install Python 3.8+ from python.org
+            Make sure to check "Add Python to PATH" during installation
+
+  Problem: "main.py not found"
+  Solution: The launcher should handle this automatically
+            Make sure you're in the project directory
+
+  Problem: "Module not found" errors
+  Solution: Install dependencies:
+            pip install -r requirements.txt
+
+  Problem: Bash/Shell errors
+  Solution: Use start_agent.bat instead - avoids all terminal issues!
+
+
+CONTROLS DURING RUNTIME:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Ctrl+C     - Stop the agent gracefully
+  F8         - Emergency kill switch (immediate stop)
+  Mouse Move - Take manual control (bot stops injecting)
+  Stop Mouse - Return to bot control after 0.5 seconds
+
+
+DASHBOARD:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Once started, open your browser to:
+  http://localhost:5000
+
+  View real-time metrics, training progress, and system status.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For more details, see: README_START.md
+
