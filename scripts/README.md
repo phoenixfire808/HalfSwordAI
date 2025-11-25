@@ -30,5 +30,5 @@ All launchers automatically:
 - Change to correct directory
 - Show clear error messages
 
-See `../docs/README_START.md` for detailed documentation.
+See `../docs/guides/QUICK_START.md` for detailed documentation.
 

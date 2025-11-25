@@ -1,0 +1,533 @@
+﻿The Construction of High-Fidelity Training Datasets for Physics-Based Medieval Combat Agents: A Deep Analysis of Half Sword
+
+
+
+
+Executive Summary
+
+
+The emergence of physics-based animation in video games represents a paradigm shift from kinematic, pre-baked animation trees to dynamic, procedural motion synthesis. Within this domain, the simulation Half Sword stands as a premier example of "active ragdoll" combat, where the player controls the forces applied to a simulated skeletal mesh rather than triggering discrete animation states.1 For researchers and developers aiming to train autonomous agents ("bots") in this environment, the challenge is twofold: first, the extraction of state-space data from a closed-source proprietary engine, and second, the curation of a training curriculum that bridges the gap between chaotic physical simulation and the disciplined biomechanics of Historical European Martial Arts (HEMA).
+This report provides a comprehensive architectural framework for generating, curating, and implementing a dataset specifically optimized for the "half-sword" technique—a method of gripping the blade for leverage and precision that is central to both the game's mechanics and historical armored combat.3 We analyze the mechanical inputs of the game, the modding infrastructure required for data extraction via UE4SS 5, and the integration of external motion capture libraries such as the Touché dataset.6 Furthermore, we synthesize a theoretical reward function based on historical treatises by Fiore de’i Liberi and Paulus Hector Mair, ensuring that the reinforcement learning (RL) agent optimizes not just for damage, but for biomechanical plausibility and historical authenticity.
+________________
+
+
+1. The Physics of the Half Sword Environment
+
+
+To construct a valid training set, one must first rigorously define the environment in which the agent operates. Unlike traditional fighting games where "moves" are discrete data objects (e.g., Attack_A has x startup frames and y active frames), Half Sword is a continuous control simulation. The "data" is not a list of moves, but a stream of physics interactions.
+
+
+1.1 Active Ragdoll Dynamics and Control Theory
+
+
+The fundamental challenge for any bot in Half Sword is the management of the "active ragdoll." In traditional animation, a character's position is absolute. In Half Sword, the character is a collection of rigid bodies (bones) connected by constraints (joints) driven by angular motors (muscles). The player's input—primarily mouse movement—does not directly move the arm; rather, it sets a target orientation for the motors, which then apply torque to reach that target against the resistance of gravity, friction, and opponent collision.1
+This distinction is critical for data collection. A training sample cannot simply record "Mouse Moved Left." It must record the Mouse Velocity Vector and the resulting Torque or Angular Velocity of the avatar's shoulder and elbow joints. The game simulates weight and momentum; a heavy poleaxe moves slower than a dagger, and the "lag" between input and action is not a network delay but a simulation of inertia.3
+
+
+1.1.1 The "Drunken" Equilibrium
+
+
+Players often describe the movement as "drunk" or "wobbly" due to the constant feedback loop between the physics solver and the balance controller.8 The agent must learn a policy $\pi(a|s)$ where the state $s$ includes the center of mass (CoM) relative to the base of support (feet). The dataset must therefore include:
+* CoM Projection: The vertical projection of the character's mass onto the ground plane.
+* Support Polygon: The area defined by the contact points of the feet.
+* Stability Margin: The distance from the CoM projection to the edge of the support polygon.
+If the dataset lacks these features, the bot will likely learn to swing the weapon effectively while falling over, or "cheese" the physics by vibrating to maintain balance.7
+
+
+1.2 The Mechanics of "Half-Swording"
+
+
+The specific user query focuses on "half swords." In the context of the game, this refers to both a weapon class and a specific stance toggle activated by the Right Mouse Button (RMB) or specific keybinds.3
+Mechanically, engaging the half-sword stance alters the physics constraints of the avatar:
+1. Leverage Shift: The left hand moves from the pommel to the mid-blade. This reduces the moment of inertia of the weapon, allowing for faster rotational acceleration but shorter range.4
+2. Stiffness Increase: The "spring" settings on the arm joints likely stiffen to simulate the rigid structure formed by the triangulated grip. This allows for higher force transmission during thrusts, essential for penetrating armor.10
+3. Collision Filter Changes: The game engine must disable self-collision damage for the hand gripping the sharp blade, or apply a "gauntlet" logic layer to prevent the player from cutting their own fingers off.11
+The dataset must capture the boolean state transition Is_Half_Swording and correlate it with collision outcomes. A dataset that fails to distinguish between a full-swing impact and a half-sword thrust impact will lead to a bot that fails to penetrate plate armor, as it will not learn the necessity of the technique for high-tier combat.3
+
+
+1.3 Procedural Damage and Material Interaction
+
+
+Half Sword does not use hitbars. It uses a procedural damage system based on:
+* Edge Alignment: The angle between the velocity vector of the weapon and the plane of the blade edge.13
+* Material Hardness: The interaction between the weapon material (e.g., tempered steel) and target material (e.g., linen, mail, plate).
+* Impulse Force: $F \Delta t = m \Delta v$. The damage is proportional to the momentum transferred during the collision time step.
+Telemetry from the game suggests that "bleeding" visual effects can be misleading; a bot training on visual blood decals alone might overestimate its success. The dataset must extract the internal "structural damage" or "organ damage" variables hidden within the game's memory to provide a true ground-truth reward signal.13
+________________
+
+
+2. Historical European Martial Arts (HEMA) as the Ground Truth Policy
+
+
+A purely data-driven approach using random exploration (epsilon-greedy strategies) often results in unnatural, "glitchy" behaviors in physics simulations. To train a bot that fights "correctly"—and specifically to build a dataset for "half swords"—we must look to the historical manuals that the game developers themselves used as reference.2 These manuals serve as the "Expert Demonstrations" for Imitation Learning (IL).
+
+
+2.1 Fiore de’i Liberi: The Master of Close Play
+
+
+The 15th-century Italian master Fiore de’i Liberi provides the foundational logic for the game's half-swording mechanics. His treatise, Fior di Battaglia (The Flower of Battle), explicitly details the transition from Gioco Largo (Wide Play) to Gioco Stretto (Close Play), where half-swording becomes dominant.15
+
+
+2.1.1 Dataset Feature: The "Posta" (Guards)
+
+
+Fiore defines specific guards for half-swording. The dataset should include skeletal pose vectors corresponding to these guards to serve as target attractors for the bot.
+* Posta di Breve (Short Guard): The sword is held close to the chest, point forward. This is the primary stance for generating thrusts in the game's half-sword mode.
+* Posta di Vera Croce (True Cross): A guard used for receiving incoming strikes and transitioning to grapples.
+* Posta di Serpentino (Serpent Guard): A withdrawn guard for rapid thrusts.
+By parsing images from the Getty manuscript 17 using pose estimation tools, we can create a "Dictionary of Valid Poses." The bot is rewarded not just for damage, but for spending time in these biomechanically advantageous states.
+
+
+2.1.2 The "Narrow Game" and Grappling
+
+
+Snippet 15 quotes Fiore: "I can be used at long range or close range, or I can be held in the half sword grip and move to the Narrow Game." In Half Sword, this corresponds to the ability to grab opponents with the Q and E keys.9
+The dataset must capture the Proximity Metric. When the distance to opponent $< 1.0m$, the utility of the half-sword grip spikes. The dataset should weight samples from this "Close Play" range higher when training the half-sword policy.
+
+
+2.2 Paulus Hector Mair: The Encyclopedic Source
+
+
+The German master Paulus Hector Mair (16th Century) provides a more granular set of techniques that can be mapped to the game's advanced inputs. The snippets provide specific translations of Mair's "Kampfstuck" (combat pieces) which are effectively algorithms for combat.18
+
+
+2.2.1 The "Kron" (Crown) Parries
+
+
+Mair describes displacing cuts in the "Kron" (a high parry with the hilt). In Half Sword, this is executed by raising the mouse while in half-sword stance.
+* Technique Logic: "If he strikes... to your left ear... release your left hand from your sword and grab his sword's blade... then immediately shoot your sword over his hilt".18
+* Action Sequence for Bot:
+   1. Detect incoming attack vector (Left High).
+   2. State: Half-Sword (RMB).
+   3. Action: Mouse Up (Kron Guard).
+   4. Trigger: Collision detected.
+   5. Action: Key Q (Left Hand Grab) targeting Enemy Weapon.
+   6. Action: Mouse Forward + Alt (Thrust) to Face.
+This sequence, derived directly from the snippet text, represents a "complex macro" that the dataset should be structured to identify and reinforce.
+
+
+2.3 Hans Talhoffer: The "Murder Stroke"
+
+
+Talhoffer is synonymous with the Mordschlag or Mordhau, where the sword is inverted to use the pommel as a mace.19
+* Game Relevance: In Half Sword, blunt damage is superior to cut damage against heavy helmets.13
+* Dataset Classification: The dataset needs a class label Weapon_Grip_State.
+   * 0: Standard Grip.
+   * 1: Half-Sword Grip.
+   * 2: Mordhau Grip (Inverted).
+* Strategic implication: The bot must learn that if Opponent_Armor == Plate and Weapon == Sword, the optimal policy is to transition to Grip_State == 2 or Grip_State == 1.4
+________________
+
+
+3. Data Engineering: Extracting the Dataset
+
+
+The user wants a dataset to "give to my bot." Since no public CSV exists, this section details the engineering required to extract it using the modding tools identified in the research.5
+
+
+3.1 The UE4SS Extraction Pipeline
+
+
+The primary tool for introspection is UE4SS (Unreal Engine 4/5 Scripting System). This tool injects a DLL (xinput1_3.dll or dwmapi.dll) into the game process to hook the Unreal Engine reflection system.5
+
+
+3.1.1 Installation and Hooking
+
+
+To begin data extraction:
+1. Navigate to the game directory: \Steam\steamapps\common\Half Sword Demo\HalfSwordUE5\Binaries\Win64.
+2. Deploy the UE4SS files. The xinput1_3.dll acts as a proxy, loading the UE4SS core before the game initializes inputs.
+3. Configure UE4SS-settings.ini to enable the "Console" and "GUIConsole" for realtime debugging.
+
+
+3.1.2 Lua Scripting for Telemetry
+
+
+UE4SS allows users to run Lua scripts that access internal UObjects. We must write a script to dump the state of the BP_HalfSword_Character (or equivalent class) every frame.
+Hypothetical Data Extraction Script Structure:
+The script must iterate through the GWorld (Game World) to find the player and opponent actors.
+
+
+Variable Group
+	In-Game Source (Estimated)
+	Data Type
+	Relevance
+	Global State
+	GetWorld()->DeltaTime
+	Float
+	Time step size, crucial for velocity calcs.
+	Skeleton
+	Mesh->GetSocketLocation(BoneName)
+	Vector3
+	Absolute position of hands, head, feet.
+	Weapon
+	HeldWeapon->GetPhysicsLinearVelocity()
+	Vector3
+	Momentum calculation for damage prediction.
+	Input
+	PlayerController->RotationInput
+	Vector2
+	The raw mouse delta being fed to the physics solver.20
+	Mode
+	Character->bIsHalfSwording
+	Boolean
+	Crucial: The flag for the requested "half sword" dataset.
+	Contact
+	Mesh->OnComponentHit
+	Event
+	Registers impacts, force magnitude, and bone hit.
+	
+
+3.1.3 The "Trainer Mod" as a Data Source
+
+
+The research identifies a "Trainer Mod" by massclown.5 This mod already contains logic to read player stats (health, stamina) and spawn items.
+* Reverse Engineering: By examining the Lua source code of the Trainer Mod (main.lua), we can identify the exact variable names used by the developers (e.g., is stamina called Stamina or Energy?).
+* Controlled Data Generation: We can use the Trainer Mod to spawn specific match-ups. For the "Half Sword" dataset, we should script a loop that:
+   1. Spawns the player with a Longsword.
+   2. Spawns an opponent in Full Plate.21
+   3. Forces the AI into a "Passive" or "Blocking" state.
+   4. Records the player's attempts to half-sword thrust into the gaps.
+
+
+3.2 Weapon Stat Extraction
+
+
+The user specifically asked for "data set for half swords." While dynamic physics data is captured during play, static weapon statistics are hidden in the game archives.
+
+
+3.2.1 Unpacking.PAK Files
+
+
+The game assets are stored in .pak files. Using a tool like FModel or UnrealPak, one can extract the DataTable assets that define weapon properties.
+* Target Files: Look for DT_Weapons or similar naming conventions.
+* Key Attributes to Extract:
+   * Mass (kg): Affects inertia.
+   * LinearDamping: Air resistance (drag).
+   * AngularDamping: Rotational resistance.
+   * CenterOfMassOffset: The balance point.
+   * BladeLength: The reach.
+   * GripOffset_HalfSword: The offset vector applied to the hand when RMB is held.
+Derived Metric: The "Agility" Score
+We can calculate an "Agility" score for each weapon in Half-Sword mode:
+
+
+
+
+$$Agility \propto \frac{1}{Mass \times Distance(Grip, CoM)}$$
+
+
+Half-swording reduces the $Distance(Grip, CoM)$, effectively increasing the Agility score, allowing for the rapid direction changes seen in high-level play.3
+________________
+
+
+4. Reinforcement Learning Architecture for the Bot
+
+
+Once the data is extracted, it must be formatted for the "bot" (the RL agent). The nature of Half Sword dictates specific architectural choices.
+
+
+4.1 Observation Space ($O$)
+
+
+The observation space must be continuous and normalized.
+* Proprioception (Body Awareness):
+   * 24 Joints $\times$ 4 (Quaternion Rotation) + 3 (Angular Velocity) = 168 dimensions.
+   * Normalization: All rotations relative to the root bone (Hips).
+* Exteroception (Vision/Awareness):
+   * Instead of raw pixels (which are computationally expensive), use "Raycasts" or "Keypoint Relative Vectors."
+   * Vector to Opponent Head.
+   * Vector to Opponent Weapon Tip.
+   * Armor State Vector: A one-hot encoded vector indicating opponent armor coverage (e.g., [Head: Plate, Chest: Mail, Legs: Cloth]). This is vital for the bot to decide when to half-sword.
+* Weapon State:
+   * Tip Position (Local Space).
+   * Edge Normal Vector (Crucial for edge alignment).
+   * Is_Half_Swording (Binary).
+
+
+4.2 Action Space ($A$)
+
+
+Half Sword uses mouse control, which is continuous.
+* Primary Actions: $\mu_x, \mu_y$ (Mouse Delta X/Y). Values clipped to $[-1, 1]$.
+* Auxiliary Actions:
+   * Stance_Switch (Discrete): {0: Normal, 1: Half-Sword}.
+   * Grab (Continuous): $$ trigger value for left/right hands.
+   * Thrust_Lock (Binary): Activation of the Alt-key thrust mechanic.22
+
+
+4.3 Reward Shaping ($R$)
+
+
+The reward function guides the learning. A simple "Damage Dealt" reward is insufficient because it encourages flailing.
+The Half-Sword Reward Function:
+
+
+
+
+$$R_t = R_{damage} + \lambda_1 R_{edge} + \lambda_2 R_{gap} + \lambda_3 R_{stance}$$
+* $R_{edge}$ (Edge Alignment): $+1$ if the velocity vector aligns with the blade plane within $10^\circ$. This teaches clean cuts.
+* $R_{gap}$ (Gap Targeting): When opponent is armored, $+1$ for touching unarmored meshes (Face, Armpits, Groin).3
+* $R_{stance}$ (Stance Appropriateness):
+   * If $Distance < 1.0m$ AND $Opponent == Armored$:
+      * $+0.1$ per frame for holding Half_Sword.
+      * $-0.1$ per frame for Normal_Grip (encourages switching).
+
+
+4.4 Network Architecture
+
+
+Given the importance of momentum and temporal dependencies, a Recurrent Neural Network (RNN) using LSTM (Long Short-Term Memory) units or a Transformer architecture is superior to a simple Feed-Forward network.
+* Reasoning: The effect of a mouse movement at time $t$ depends on the momentum built up at $t-10$. The "wobbly" nature of the physics 7 means the state is never fully observable from a single snapshot; the network must infer the internal momentum variables over a time window.
+________________
+
+
+5. Integrating External Datasets for Transfer Learning
+
+
+To speed up training, we can "pre-train" the bot using existing datasets of human motion. This prevents the bot from having to learn how to walk or swing from scratch (the "Tabula Rasa" problem).
+
+
+5.1 The Touché Dataset
+
+
+The Touché: Data-Driven Interactive Sword Fighting in Virtual Reality dataset 6 is the most relevant external corpus.
+* Contents: It contains sword-fighting interactions recorded in VR, specifically classified by gesture direction (Up, Down-Right, etc.) and parry types.
+* Relevance: The "Gesture Recognition" data 24 maps human arm movements to sword intents.
+* Integration Strategy:
+   1. Map Classes: Map Touché classes (e.g., "Top Strike") to Half Sword mouse vectors (e.g., Mouse_Y > 0.5).
+   2. Supervised Pre-training: Train the bot's policy network to predict the Touché class given a sequence of skeletal poses. This gives the bot a "vocabulary" of sword moves before it enters the physics simulation.
+
+
+5.2 Motion Capture (BVH) Libraries
+
+
+We can utilize general motion capture libraries to teach the bot "style" and balance.
+* Kubold HEMA Animations: 25 references "Kubold," a provider of HEMA-specific mocap (Longsword, Sword & Shield). These animations are kinematically correct representations of the techniques described by Fiore and Liechtenauer.
+* Bandai Namco Research: 26 released 3,000+ motion files, including fighting and dancing.
+* CMU Graphics Lab: 27 provides a massive open-source library.
+Technique: Motion Matching / GANs
+We can use a Generative Adversarial Network (GAN).
+* Generator: The RL Bot generating physics movements.
+* Discriminator: A network trained on the Kubold/CMU BVH files.
+* Objective: The Discriminator tries to distinguish between the "fake" physics movement and the "real" mocap. The Bot is rewarded for fooling the Discriminator. This forces the active ragdoll to move naturally, avoiding the "spaghetti arm" or "vibrating glitch" behavior often seen in physics games.7
+________________
+
+
+6. Case Studies: Tiered Curriculum Learning
+
+
+Half Sword features a class system (Beggar, Peasant, Knight) that acts as a built-in difficulty curve.28 We should structure the dataset and training into a Curriculum.
+
+
+Phase 1: The Beggar (Kinematic Basics)
+
+
+* Scenario: Unarmored vs. Unarmored. Improvised weapons (Sticks, Candlesticks).
+* Learning Goal: Basic locomotion, spacing, and generating momentum.
+* Dataset Filter: Exclude all Armor variables. Focus on Velocity and Hit_Rate.
+
+
+Phase 2: The Footman (Weapon Length & Cutting)
+
+
+* Scenario: Light Armor (Gambeson) vs. Polearms/Axes.
+* Learning Goal: Edge alignment. The bot learns that hitting with the flat of the axe does 0 damage.13
+* Dataset Filter: Focus on Edge_Alignment_Dot_Product.
+
+
+Phase 3: The Knight (Half-Swording & Precision)
+
+
+* Scenario: Full Plate vs. Longsword.
+* Learning Goal: The "Half Sword" request.
+* Constraint: Standard cuts deal 0 damage.
+* New Action: Bot must learn to use RMB (Half-Sword) to actuate the Thrust mechanic.
+* Targeting: Reward shifts from "Center of Mass" to specific "Weak Point" hitboxes (e.g., Mesh Bone: Head_Neck_Lower, Arm_Pit_L).
+________________
+
+
+7. Future-Proofing and Community Considerations
+
+
+The Half Sword environment is in active development ("Playtest" phase).2 This introduces volatility to the dataset.
+* Physics Updates: Snippet 29 notes that "v0.4 physics changes nerfed these moves pretty hard and fixed the death roll bug." This implies that data collected in v0.3 may be invalid for v0.4.
+   * Implication: The dataset must include a Game_Version column.
+   * Strategy: Continuous Integration (CI) for the bot. When a new game patch drops, run the UE4SS extraction script to generate a "Validation Set." If the bot's performance drops significantly on the new physics, trigger a re-training session.
+* Gore and Performance: High gore settings can cause crashes or lag.30 For automated data collection, the graphics settings should be set to Low and gore disabled to ensure stable frame times (DeltaTime), which creates cleaner physics data.
+________________
+
+
+Conclusion
+
+
+The construction of a "half sword" dataset for an autonomous learning agent is a multi-disciplinary engineering challenge. It requires the extraction of hidden variables (torque, material hardness, structural damage) from the Half Sword proprietary engine using UE4SS injection. It requires the structuring of this data into a continuous observation space suitable for LSTM or Transformer networks. Crucially, it requires the injection of domain knowledge—specifically the half-swording techniques of Fiore de’i Liberi and Paulus Hector Mair—to constrain the search space of the AI and prevent it from learning degenerate strategies.
+By synthesizing in-game telemetry with the Touché gesture library and HEMA pose priors, we can create a dataset that not only teaches a bot to win but teaches it to fence with historical and physical fidelity.
+
+
+Table 1: Proposed Schema for Half Sword Training Dataset (CSV/Parquet)
+
+
+Column Name
+	Data Type
+	Description
+	Source
+	timestamp
+	Int64
+	Frame counter / Milliseconds.
+	Engine
+	game_version
+	String
+	e.g., "v0.4 Playtest".
+	Engine
+	input_mouse_x
+	Float
+	Control input X (-1.0 to 1.0).
+	Input
+	input_mouse_y
+	Float
+	Control input Y (-1.0 to 1.0).
+	Input
+	is_half_sword
+	Boolean
+	True if RMB is held.
+	Target Variable
+	hand_l_pos_x
+	Float
+	Left hand local X position.
+	Skeleton
+	hand_r_pos_x
+	Float
+	Right hand local X position.
+	Skeleton
+	weapon_tip_vel
+	Vector3
+	Velocity of the damaging point.
+	Physics
+	edge_align_score
+	Float
+	Dot product of velocity and blade plane.
+	Calculated
+	target_dist
+	Float
+	Distance to nearest opponent bone.
+	Raycast
+	opponent_armor
+	Enum
+	{None, Cloth, Mail, Plate}.
+	Game State
+	historical_pose
+	Enum
+	Closest match to Fiore Posta (e.g., "Breve").
+	Classifier
+	damage_dealt
+	Float
+	Actual HP/Structure damage inflicted.
+	Memory Read
+	
+
+Table 2: Input Mapping for Bot Action Space
+
+
+
+
+Action ID
+	Name
+	Description
+	Physics Implication
+	ACT_00
+	Swing_Right
+	Mouse X > 0.5
+	Generating rotational momentum.
+	ACT_01
+	Swing_Left
+	Mouse X < -0.5
+	Generating rotational momentum.
+	ACT_02
+	Guard_High
+	Mouse Y > 0.5
+	Protecting head/Kron guard.18
+	ACT_03
+	Half_Sword_Toggle
+	Hold RMB
+	Shifts lever arm, increases stiffness.3
+	ACT_04
+	Thrust_Lock
+	Alt + Mouse Fwd
+	Linearizes force vector for penetration.22
+	ACT_05
+	Grapple_L
+	Press Q
+	Attempt to attach left hand constraint to enemy.
+	ACT_06
+	Mordhau_Grip
+	Press X (Context)
+	Inverts weapon for blunt damage.31
+	________________
+
+
+Technical Appendix: Tools & Resources
+
+
+
+
+A. Modding & Extraction
+
+
+* UE4SS: The backbone of data extraction. Used to dump memory states.5
+* Half Sword Trainer Mod: Provides the logic for accessing player stats and spawning specific training dummies.5
+* Split Screen Mod: Useful for training "Self-Play" agents on a single machine.32
+
+
+B. External Datasets (Downloadable)
+
+
+* Touché: Data-Driven Interactive Sword Fighting in Virtual Reality.6
+   * Usage: Gesture classification pre-training.
+* CMU Mocap / Bandai Namco: Large libraries of BVH files.26
+   * Usage: Motion matching for natural movement.
+* Roboflow: "Weapon Detection" datasets.33
+   * Usage: Visual recognition of opponent weaponry (e.g., distinguishing a Poleaxe from a Sword).
+
+
+C. Historical References (Manuals)
+
+
+* Fiore de'i Liberi: Fior di Battaglia (Getty MS). Focus on "Close Play" and "Half Sword".16
+* Paulus Hector Mair: Opus Amplissimum. Focus on "Kron" parries and advanced binds.18
+* Hans Talhoffer: Fechtbuch. Focus on "Mordhau" and judicial dueling techniques.19
+Works cited
+1. Half Sword Games, accessed November 24, 2025, https://halfswordgames.com/
+2. Half Sword on Steam, accessed November 24, 2025, https://store.steampowered.com/app/2397300/Half_Sword/
+3. How To Play Half-Sword (IMO) + Tips : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1i24tkm/how_to_play_halfsword_imo_tips/
+4. Half-sword - Wikipedia, accessed November 24, 2025, https://en.wikipedia.org/wiki/Half-sword
+5. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordTrainerMod
+6. Touché: Data-Driven Interactive Sword Fighting in Virtual Reality, accessed November 24, 2025, https://revealcentre.org/projects/touche/
+7. Hate to be "that guy" but PvP isn't going to happen, because right now, it can't. : r/HalfSword, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1husouv/hate_to_be_that_guy_but_pvp_isnt_going_to_happen/
+8. Shield and sword are just OP? : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1no2s57/shield_and_sword_are_just_op/
+9. What are the FULL game controls? : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1k9ebol/what_are_the_full_game_controls/
+10. Category:Armored Fencing - Wiktenauer, accessed November 24, 2025, https://wiktenauer.com/wiki/Category:Armored_Fencing
+11. Which swords would you like to see most : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1jkd4ik/which_swords_would_you_like_to_see_most/
+12. Talhoffer Sword -- myArmoury.com, accessed November 24, 2025, http://myarmoury.com/review_alb_talh.html
+13. Do some enemies have more courage than others? :: Half Sword General Discussions - Steam Community, accessed November 24, 2025, https://steamcommunity.com/app/2397300/discussions/0/572641938359083015/
+14. Damage should be reworked : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1ipti4v/damage_should_be_reworked/
+15. Fiore de'i Liberi - Wiktenauer, accessed November 24, 2025, https://wiktenauer.com/wiki/Fiore_de%27i_Liberi
+16. The Flower of Battle of Master Fiore Friulano de'i Liberi | HROARR, accessed November 24, 2025, https://hroarr.com/wp-content/uploads/downloads/2016/08/wiktenauer-Fiore-de-i-Liberi-compilation-2016.pdf
+17. Armored Sword Plays - Learn Fiore, accessed November 24, 2025, http://learnfiore.org/wp-content/uploads/Fiore-Armored-Sword-1.pdf
+18. The Half-Swording of Paulus Hector Mair | PDF - Scribd, accessed November 24, 2025, https://www.scribd.com/document/566020077/PHM-Half-Sword
+19. Talhoffer Longsword - Armoured and Unarmoured, accessed November 24, 2025, https://www.thearma.org/essays/HT-A&UA.htm
+20. How to improve your Mouse Control And Stop Missing In Half Sword! - YouTube, accessed November 24, 2025, https://www.youtube.com/watch?v=NogO0DVQvCw
+21. This REALISTIC Physics-Based SWORD FIGHTING GAME Just Got a Big UPDATE, accessed November 24, 2025, https://www.youtube.com/watch?v=C0ugmlp_OGM
+22. Finally figured out stabbing (with help from this subreddit), and now I feel crazy powerful : r/HalfSword, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1kzhs5u/finally_figured_out_stabbing_with_help_from_this/
+23. Dataset for "Touché: Data-Driven Interactive Sword Fighting in ..., accessed November 24, 2025, https://researchportal.bath.ac.uk/en/datasets/dataset-for-touch%C3%A9-data-driven-interactive-sword-fighting-in-virt
+24. (PDF) Touché: Data-Driven Interactive Sword Fighting in Virtual Reality - ResearchGate, accessed November 24, 2025, https://www.researchgate.net/publication/341692307_Touche_Data-Driven_Interactive_Sword_Fighting_in_Virtual_Reality
+25. Shields in games vs HEMA (free mocap file download) - animations - YouTube, accessed November 24, 2025, https://www.youtube.com/watch?v=YsyXBCnslDk
+26. Download 3000 free mocap moves from Bandai Namco - CG Channel, accessed November 24, 2025, https://www.cgchannel.com/2022/05/download-3000-free-mocap-moves-from-bandai-namco-research/
+27. Where to find BVH files | Thomas@MakeHuman - WordPress.com, accessed November 24, 2025, https://thomasmakehuman.wordpress.com/makewalk/where-to-find-bvh-files/
+28. Half Sword Classes Alignment Chart (explanation in post) : r ... - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1lr6nqb/half_sword_classes_alignment_chart_explanation_in/
+29. Hip Throw and Wristlock Tutorial - Half Sword Playtest v0.3 - YouTube, accessed November 24, 2025, https://www.youtube.com/watch?v=dkklP_vuKHI
+30. Half sword keeps crashing : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1gzvi18/half_sword_keeps_crashing/
+31. Diplomacy 4.litdum (v1.7 has been released - 28.02.2023) | Page 5 - TaleWorlds Forums, accessed November 24, 2025, https://forums.taleworlds.com/index.php?threads/diplomacy-4-litdum-v1-7-has-been-released-28-02-2023.356426/page-5
+32. massclown/HalfSwordSplitScreenMod: Half Sword Split Screen Mod - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordSplitScreenMod
+33. Top Sword Datasets and Models | Roboflow Universe, accessed November 24, 2025, https://universe.roboflow.com/search?q=class%3Asword
+34. Longsword Sequences from Paulus Hector Mair's Longsword Treatise (c. 1550) - HROARR, accessed November 24, 2025, https://www.hroarr.com/manuals/liechtenauer/mair_longsword.pdf

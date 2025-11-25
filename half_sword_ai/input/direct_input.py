@@ -117,38 +117,51 @@ class DirectInput:
         Returns:
             True if successful
         """
-        # Rate limiting
-        current_time = time.time()
-        if current_time - self.last_mouse_time < self.mouse_cooldown:
-            time.sleep(self.mouse_cooldown - (current_time - self.last_mouse_time))
+        try:
+            # Clamp values to prevent overflow (Windows API limit)
+            dx = max(-32768, min(32767, int(dx)))
+            dy = max(-32768, min(32767, int(dy)))
+            
+            # Skip if zero movement
+            if dx == 0 and dy == 0:
+                return True
+            
+            # Rate limiting
+            current_time = time.time()
+            sleep_needed = self.mouse_cooldown - (current_time - self.last_mouse_time)
+            if sleep_needed > 0:
+                time.sleep(min(sleep_needed, 0.01))  # Cap sleep at 10ms
         
-        # Create mouse input structure
-        extra = ctypes.c_ulong(0)
-        ii_ = INPUT_UNION()
-        ii_.mi = MOUSEINPUT(
-            dx=dx,
-            dy=dy,
-            mouseData=0,
-            dwFlags=MOUSEEVENTF_MOVE,  # Relative movement - CRITICAL
-            time=0,
-            dwExtraInfo=ctypes.pointer(extra)
-        )
-        
-        # Create input structure
-        x = INPUT(
-            type=INPUT_MOUSE,
-            ii=ii_
-        )
-        
-        # Send input
-        result = self.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
-        self.last_mouse_time = time.time()
-        
-        if result != 1:
-            logger.warning(f"SendInput failed for mouse movement: {result}")
+            # Create mouse input structure
+            extra = ctypes.c_ulong(0)
+            ii_ = INPUT_UNION()
+            ii_.mi = MOUSEINPUT(
+                dx=dx,
+                dy=dy,
+                mouseData=0,
+                dwFlags=MOUSEEVENTF_MOVE,  # Relative movement - CRITICAL
+                time=0,
+                dwExtraInfo=ctypes.pointer(extra)
+            )
+            
+            # Create input structure
+            x = INPUT(
+                type=INPUT_MOUSE,
+                ii=ii_
+            )
+            
+            # Send input
+            result = self.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+            self.last_mouse_time = time.time()
+            
+            if result != 1:
+                logger.warning(f"SendInput failed for mouse movement: result={result}, dx={dx}, dy={dy}")
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error in move_mouse_relative: {e}", exc_info=True)
             return False
-        
-        return True
     
     def press_key(self, scancode: int) -> bool:
         """

@@ -176,11 +176,20 @@ class KillSwitch:
             logger.critical(f"Kill button ({self.hotkey.upper()}) pressed - Emergency shutdown initiated")
             logger.critical("="*80)
             
+            # Call callback immediately and forcefully
             if self.kill_callback:
                 try:
+                    # Call in separate thread to avoid blocking
+                    import threading
+                    callback_thread = threading.Thread(target=self.kill_callback, daemon=True)
+                    callback_thread.start()
+                    # Also try direct call for immediate effect
                     self.kill_callback()
                 except Exception as e:
                     logger.error(f"Kill callback error: {e}", exc_info=True)
+                    # Force exit even if callback fails
+                    import os
+                    os._exit(0)
     
     def start(self):
         """Start kill switch with multiple detection methods"""
@@ -266,7 +275,7 @@ class KillSwitch:
                         self.last_check_time = current_time
                     
                     consecutive_errors = 0  # Reset on success
-                    time.sleep(0.05)  # 50ms polling
+                    time.sleep(0.01)  # 10ms polling for faster response
                     
                 except Exception as e:
                     consecutive_errors += 1

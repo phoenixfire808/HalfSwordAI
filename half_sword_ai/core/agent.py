@@ -7,6 +7,7 @@ import multiprocessing
 import signal
 import sys
 import time
+import threading
 import logging
 import os
 from half_sword_ai.config import config
@@ -20,7 +21,7 @@ from half_sword_ai.core.learner import LearnerProcess
 # LLM integration removed
 from half_sword_ai.monitoring.performance_monitor import PerformanceMonitor
 from half_sword_ai.input.kill_switch import KillSwitch
-from half_sword_ai.monitoring.dashboard.server import DashboardServer
+from half_sword_ai.monitoring.gui_dashboard import GUIDashboard
 from half_sword_ai.core.error_handler import ErrorHandler
 from half_sword_ai.tools.half_sword_dataset_builder import HalfSwordDatasetBuilder
 
@@ -77,25 +78,34 @@ class HalfSwordAgent:
         self.dashboard = None
         self.error_handler = None
         self.dataset_builder = None
+        self.ue4ss_integration = None
         self.running = False
         self.emergency_stop = False
         self.emergency_stop = False
         
     def initialize(self):
         """Initialize all components"""
+        init_start_time = time.time()
         logger.info("="*80)
         logger.info("Initializing Half Sword AI Agent...")
         logger.info("="*80)
+        logger.debug(f"[AGENT] Initialization started | timestamp={init_start_time}")
         
         # Initialize performance monitor first
         logger.info("Initializing performance monitor...")
-        self.performance_monitor = PerformanceMonitor()
-        logger.info("Performance monitor ready")
+        logger.debug("[AGENT] Creating PerformanceMonitor instance")
+        try:
+            self.performance_monitor = PerformanceMonitor()
+            logger.info("Performance monitor ready")
+            logger.debug(f"[AGENT] PerformanceMonitor initialized successfully")
+        except Exception as e:
+            logger.error(f"[AGENT] PerformanceMonitor initialization failed: {e}", exc_info=True)
+            raise
         
         # Initialize error handler early (other components can use it)
         logger.info("Initializing error handler...")
         self.error_handler = ErrorHandler(agent=self, max_errors=10, error_window=60.0)
-        logger.info("✅ Error handler initialized - Auto-stop and fix enabled")
+        logger.info("Error handler initialized - Auto-stop and fix enabled")
         
         # LLM integration removed
         
@@ -110,36 +120,50 @@ class HalfSwordAgent:
         self.replay_buffer = PrioritizedReplayBuffer()
         logger.info("Replay buffer initialized")
         
-        # Initialize perception
+        # Initialize perception (parallelize screen capture and memory reader)
         logger.info("Initializing perception layer...")
         self.screen_capture = ScreenCapture()
         self.memory_reader = MemoryReader()
         
-        # Check if game is running, launch if needed
+        # Check if game is running, launch if needed (optimized - don't wait if already running)
         if config.AUTO_LAUNCH_GAME and not self.memory_reader.is_process_running():
             logger.info("Game process not detected. Attempting to launch game...")
             self.memory_reader._launch_game_if_needed()
-            # Wait a bit for game to start
-            import time
-            time.sleep(3.0)
+            # Reduced wait time - check periodically instead of blocking
+            for i in range(20):  # Check 20 times over 1 second instead of blocking 3 seconds
+                time.sleep(0.05)
+                if self.memory_reader.is_process_running():
+                    break
             # Try attaching again
             if hasattr(self.memory_reader, '_attach_to_process'):
                 self.memory_reader._attach_to_process()
         
         logger.info("Perception layer ready")
         
+        # YOLO overlay is now integrated into GUI dashboard (no separate window)
+        self.yolo_overlay = None
+        
         # Initialize input
         logger.info("Initializing input multiplexer...")
-        self.input_mux = InputMultiplexer()
+        logger.debug("[AGENT] Creating InputMultiplexer instance")
+        try:
+            self.input_mux = InputMultiplexer()
+            logger.debug(f"[AGENT] InputMultiplexer created | "
+                        f"physics_controller={self.input_mux.physics_controller is not None} | "
+                        f"direct_input={self.input_mux.direct_input is not None} | "
+                        f"gesture_engine={self.input_mux.gesture_engine is not None}")
+        except Exception as e:
+            logger.error(f"[AGENT] InputMultiplexer initialization failed: {e}", exc_info=True)
+            raise
         
         # Log interception status
         from half_sword_ai.input.input_mux import INTERCEPTION_AVAILABLE
         if INTERCEPTION_AVAILABLE and hasattr(self.input_mux, 'interception') and self.input_mux.interception:
-            logger.info("✅ Input multiplexer ready - Using Interception driver (kernel-level)")
+            logger.info("Input multiplexer ready - Using Interception driver (kernel-level)")
+            logger.debug(f"[AGENT] Interception driver active | device_id={self.input_mux.mouse_device_id}")
         else:
-            logger.info("✅ Input multiplexer ready - Using DirectInput (fallback mode)")
-            logger.info("   Note: Interception driver not installed (optional)")
-            logger.info("   See INTERCEPTION_INSTALL.md if you want kernel-level control")
+            logger.info("Input multiplexer ready - Using DirectInput (fallback mode)")
+            logger.debug(f"[AGENT] Using DirectInput fallback | INTERCEPTION_AVAILABLE={INTERCEPTION_AVAILABLE}")
         
         # Initialize watchdog
         logger.info("Initializing watchdog...")
@@ -153,6 +177,8 @@ class HalfSwordAgent:
             self.memory_reader, self.screen_capture, self.watchdog,
             self.performance_monitor
         )
+        # Pass YOLO overlay to actor for real-time updates
+        # YOLO overlay is integrated into GUI dashboard - no separate window needed
         # Pass error handler to actor (if initialized)
         if self.error_handler:
             self.actor.error_handler = self.error_handler
@@ -160,11 +186,11 @@ class HalfSwordAgent:
         
         # Initialize learner (before dashboard so dashboard can access it)
         logger.info("Initializing learner process...")
-        self.learner = LearnerProcess(self.model, self.replay_buffer, self.performance_monitor)
+        self.learner = LearnerProcess(self.model, self.replay_buffer, self.performance_monitor, actor_process=self.actor)
         # Pass error handler to learner (if initialized)
         if self.error_handler:
             self.learner.error_handler = self.error_handler
-        logger.info("Learner process ready")
+        logger.info("Learner process ready - Autonomous learning enabled!")
         
         # Start performance monitoring
         self.performance_monitor.start_episode()
@@ -177,7 +203,7 @@ class HalfSwordAgent:
             hotkey=config.KILL_BUTTON
         )
         self.kill_switch.start()
-        logger.info(f"✅ Kill switch active - Press {config.KILL_BUTTON.upper()} for emergency stop")
+        logger.info(f"Kill switch active - Press {config.KILL_BUTTON.upper()} for emergency stop")
         
         # Initialize enhanced dataset builder (if enabled)
         if config.ENABLE_DATASET_COLLECTION:
@@ -202,55 +228,105 @@ class HalfSwordAgent:
         else:
             logger.info("Dataset collection disabled (set ENABLE_DATASET_COLLECTION=True to enable)")
         
-        # Initialize dashboard (after all components are ready)
-        logger.info("Initializing dashboard server...")
+        # Initialize UE4SS integration if enabled
+        if config.UE4SS_ENABLED:
+            logger.info("Initializing UE4SS integration...")
+            logger.debug(f"[AGENT] UE4SS enabled | "
+                        f"game_path={config.UE4SS_GAME_PATH} | "
+                        f"mods_dir={config.UE4SS_MODS_DIRECTORY} | "
+                        f"auto_install={config.UE4SS_AUTO_INSTALL}")
+            try:
+                from half_sword_ai.tools.ue4ss_integration import UE4SSIntegration, get_default_config
+                logger.debug("[AGENT] Importing UE4SS modules successful")
+                
+                ue4ss_config = get_default_config()
+                logger.debug(f"[AGENT] Default UE4SS config | "
+                           f"game_path={ue4ss_config.game_path} | "
+                           f"mods_dir={ue4ss_config.mods_directory} | "
+                           f"version={ue4ss_config.version}")
+                
+                if config.UE4SS_GAME_PATH:
+                    ue4ss_config.game_path = config.UE4SS_GAME_PATH
+                    logger.debug(f"[AGENT] Overriding game_path with config: {config.UE4SS_GAME_PATH}")
+                if config.UE4SS_MODS_DIRECTORY:
+                    ue4ss_config.mods_directory = config.UE4SS_MODS_DIRECTORY
+                    logger.debug(f"[AGENT] Overriding mods_directory with config: {config.UE4SS_MODS_DIRECTORY}")
+                
+                logger.debug("[AGENT] Creating UE4SSIntegration instance")
+                self.ue4ss_integration = UE4SSIntegration(ue4ss_config)
+                
+                # Check installation
+                logger.debug("[AGENT] Checking UE4SS installation")
+                installation_check = self.ue4ss_integration.check_installation()
+                logger.debug(f"[AGENT] UE4SS installation check result: {installation_check}")
+                
+                if not installation_check:
+                    if config.UE4SS_AUTO_INSTALL:
+                        logger.warning("UE4SS not installed - auto-install disabled. Install manually or set UE4SS_AUTO_INSTALL=True")
+                        logger.debug("[AGENT] Auto-install is disabled - manual installation required")
+                    else:
+                        logger.warning("UE4SS not installed. See docs/integration/UE4SS_INTEGRATION.md for setup")
+                        logger.debug("[AGENT] UE4SS installation not found - see documentation for setup")
+                else:
+                    logger.info("UE4SS integration ready")
+                    logger.debug(f"[AGENT] UE4SS integration active | "
+                               f"is_installed={self.ue4ss_integration.is_installed} | "
+                               f"is_active={self.ue4ss_integration.is_active}")
+            except ImportError as e:
+                logger.warning(f"UE4SS integration import failed: {e}")
+                logger.debug(f"[AGENT] UE4SS import error details: {e}", exc_info=True)
+                self.ue4ss_integration = None
+            except Exception as e:
+                logger.warning(f"UE4SS integration initialization failed: {e}")
+                logger.debug(f"[AGENT] UE4SS initialization error details: {e}", exc_info=True)
+                self.ue4ss_integration = None
+        else:
+            logger.debug("[AGENT] UE4SS integration disabled in config")
+        
+        # Initialize GUI dashboard (after all components are ready) - non-blocking
+        logger.info("Initializing GUI dashboard...")
         try:
-            self.dashboard = DashboardServer(
+            self.dashboard = GUIDashboard(
+                agent=self,
                 performance_monitor=self.performance_monitor,
-                input_mux=self.input_mux,
                 actor=self.actor,
-                kill_switch=self.kill_switch,
-                vision_processor=self.actor.vision_processor if hasattr(self.actor, 'vision_processor') else None,
                 learner=self.learner
             )
             
-            # Set human recorder reference if available
-            if hasattr(self.actor, 'human_recorder'):
-                self.dashboard.human_recorder = self.actor.human_recorder
+            # Start dashboard in separate thread (tkinter needs its own thread)
+            # Use daemon thread so it exits when main program exits
+            dashboard_thread = threading.Thread(target=self.dashboard.start, daemon=True)
+            dashboard_thread.start()
             
-            # Start dashboard server
-            if self.dashboard.app is not None:
-                self.dashboard.start()
-                # Wait a moment to verify it started
-                import time
-                time.sleep(0.5)
-                if self.dashboard.running:
-                    logger.info("✅ Dashboard server started successfully")
-                else:
-                    logger.warning("⚠️  Dashboard server started but may not be running")
-            else:
-                logger.warning("⚠️  Dashboard server app not initialized - check Flask installation")
+            # Small delay to let GUI initialize
+            time.sleep(0.3)
+            logger.info("GUI dashboard started (unified window with YOLO overlay)")
         except Exception as e:
-            logger.error(f"Failed to initialize dashboard: {e}", exc_info=True)
+            logger.error(f"Failed to initialize GUI dashboard: {e}", exc_info=True)
             self.dashboard = None
         
         # Final integration checks
+        init_end_time = time.time()
+        init_duration = init_end_time - init_start_time
         logger.info("Performing integration checks...")
+        logger.debug(f"[AGENT] Initialization completed | "
+                    f"duration={init_duration:.2f}s | "
+                    f"timestamp={init_end_time}")
         
         # Verify input mux integration
         if self.input_mux and hasattr(self.actor, 'human_recorder'):
             if not hasattr(self.input_mux, 'human_action_recorder'):
                 logger.warning("Input mux missing human_action_recorder reference")
             else:
-                logger.info("✅ Input mux ↔ Human recorder integration verified")
+                logger.info("Input mux <-> Human recorder integration verified")
         
         # Verify learner integration with model tracker
         if self.learner and hasattr(self.learner, 'model_tracker'):
-            logger.info("✅ Learner ↔ Model tracker integration verified")
+            logger.info("Learner <-> Model tracker integration verified")
         
         # Verify replay buffer integration
         if self.replay_buffer and self.actor and self.learner:
-            logger.info(f"✅ Replay buffer shared: {len(self.replay_buffer)} experiences")
+            logger.info(f"Replay buffer shared: {len(self.replay_buffer)} experiences")
         
         logger.info("Initialization complete!")
         logger.info("")
@@ -294,8 +370,8 @@ class HalfSwordAgent:
         print(f"   Press {config.KILL_BUTTON.upper()} → IMMEDIATELY stop bot")
         print("   Works instantly, even during active bot control\n")
         
-        print(f"🌐 DASHBOARD:")
-        print(f"   http://localhost:{self.dashboard.port if self.dashboard else 5000}")
+        print(f"GUI DASHBOARD:")
+        print(f"   Python GUI window should be open")
         print("   Real-time monitoring of all metrics\n")
         
         print("🛡️ SAFETY FEATURES:")
@@ -324,11 +400,17 @@ class HalfSwordAgent:
             
             # Main monitoring loop - check for kill switch
             while self.running and not self.emergency_stop:
-                # Check kill switch status periodically
-                if self.kill_switch and self.kill_switch.is_killed():
-                    logger.critical("Kill switch detected - initiating emergency shutdown")
-                    self._emergency_kill()
-                    break
+                # Check kill switch status periodically (check more frequently for responsiveness)
+                if self.kill_switch:
+                    if self.kill_switch.is_killed():
+                        logger.critical("Kill switch detected - initiating emergency shutdown")
+                        self._emergency_kill()
+                        break
+                    # Also check killed flag directly for faster response
+                    if hasattr(self.kill_switch, 'killed') and self.kill_switch.killed:
+                        logger.critical("Kill switch triggered - initiating emergency shutdown")
+                        self._emergency_kill()
+                        break
                 
                 # Check error handler for critical errors (auto-stop on errors)
                 if self.error_handler and len(self.error_handler.critical_errors) > 0:
@@ -342,7 +424,12 @@ class HalfSwordAgent:
                     logger.warning("Actor process stopped unexpectedly")
                     break
                 
-                time.sleep(0.1)  # Small delay to allow kill switch and error checking
+                # Check kill switch more frequently - don't sleep if kill switch is active
+                if self.kill_switch and (self.kill_switch.is_killed() or 
+                                         (hasattr(self.kill_switch, 'killed') and self.kill_switch.killed)):
+                    # Kill switch detected - exit immediately
+                    break
+                time.sleep(0.05)  # Reduced delay for faster kill switch response
             
             # If we get here, either normal shutdown or emergency stop
             if self.kill_switch and self.kill_switch.is_killed():
@@ -373,35 +460,70 @@ class HalfSwordAgent:
         
         # Immediately enable safety lock
         if self.input_mux:
-            logger.critical("Enabling safety lock - bot input completely disabled")
-            self.input_mux.enable_safety_lock()
-            self.input_mux.force_manual_mode()
-            self.input_mux.stop()
+            try:
+                logger.critical("Enabling safety lock - bot input completely disabled")
+                self.input_mux.enable_safety_lock()
+                self.input_mux.force_manual_mode()
+                self.input_mux.stop()
+            except Exception as e:
+                logger.error(f"Error stopping input: {e}")
         
-        # Stop all processes
+        # Stop all processes forcefully
         if self.actor:
-            logger.critical("Stopping actor process...")
-            self.actor.stop()
+            try:
+                logger.critical("Stopping actor process...")
+                self.actor.running = False
+                self.actor.stop()
+            except Exception as e:
+                logger.error(f"Error stopping actor: {e}")
         
         if self.learner:
-            logger.critical("Stopping learner process...")
-            self.learner.stop()
+            try:
+                logger.critical("Stopping learner process...")
+                self.learner.running = False
+                self.learner.stop()
+            except Exception as e:
+                logger.error(f"Error stopping learner: {e}")
         
         if self.screen_capture:
-            self.screen_capture.stop()
+            try:
+                self.screen_capture.stop()
+            except:
+                pass
         
         # Record kill event
         if self.performance_monitor:
-            self.performance_monitor.record_warning("EMERGENCY KILL ACTIVATED", "kill_switch")
-            self.performance_monitor.end_episode("emergency_kill")
+            try:
+                self.performance_monitor.record_warning("EMERGENCY KILL ACTIVATED", "kill_switch")
+                self.performance_monitor.end_episode("emergency_kill")
+            except:
+                pass
         
         # Stop dataset builder if active
         if self.dataset_builder and self.dataset_builder.recording:
-            logger.info("Stopping dataset collection...")
-            self.dataset_builder.stop_recording()
+            try:
+                logger.info("Stopping dataset collection...")
+                self.dataset_builder.stop_recording()
+            except:
+                pass
+        
+        # Stop dashboard
+        if self.dashboard:
+            try:
+                self.dashboard.running = False
+            except:
+                pass
         
         logger.critical("Emergency shutdown complete - bot is now safe")
         logger.critical("="*80)
+        
+        # Force immediate exit
+        import os
+        import sys
+        try:
+            os._exit(0)
+        except:
+            sys.exit(0)
     
     def shutdown(self):
         """Shutdown all components"""
@@ -412,49 +534,86 @@ class HalfSwordAgent:
         logger.info("Shutting down agent...")
         self.running = False
         
-        # Stop kill switch
+        # Stop kill switch first
         if self.kill_switch:
-            self.kill_switch.stop()
+            try:
+                self.kill_switch.stop()
+            except:
+                pass
         
-        # Stop dashboard
-        if self.dashboard:
-            self.dashboard.stop()
-        
+        # Stop actor and learner processes
         if self.actor:
-            self.actor.stop()
+            try:
+                self.actor.running = False
+                self.actor.stop()
+            except:
+                pass
         
         if self.learner:
-            self.learner.stop()
+            try:
+                self.learner.running = False
+                self.learner.stop()
+            except:
+                pass
         
+        # Stop input
         if self.input_mux:
-            self.input_mux.stop()
+            try:
+                self.input_mux.stop()
+            except:
+                pass
         
+        # Stop screen capture
         if self.screen_capture:
-            self.screen_capture.stop()
+            try:
+                self.screen_capture.stop()
+            except:
+                pass
         
         # Stop and save dataset builder if active
         if self.dataset_builder and self.dataset_builder.recording:
-            logger.info("Stopping dataset collection and saving...")
-            self.dataset_builder.stop_recording()
+            try:
+                logger.info("Stopping dataset collection and saving...")
+                self.dataset_builder.stop_recording()
+            except:
+                pass
         
         # Save model
         if self.model:
-            self._save_model()
+            try:
+                self._save_model()
+            except:
+                pass
         
         # Generate final performance report
         if self.performance_monitor:
-            logger.info("Generating final performance report...")
-            final_report = self.performance_monitor.generate_report(
-                f"{config.LOG_PATH}/final_performance_report.txt"
-            )
-            logger.info(final_report)
-            
-            # Save metrics JSON
-            self.performance_monitor.save_metrics_json(
-                f"{config.LOG_PATH}/final_metrics.json"
-            )
+            try:
+                logger.info("Generating final performance report...")
+                final_report = self.performance_monitor.generate_report(
+                    f"{config.LOG_PATH}/final_performance_report.txt"
+                )
+                logger.info(final_report)
+                
+                # Save metrics JSON
+                self.performance_monitor.save_metrics_json(
+                    f"{config.LOG_PATH}/final_metrics.json"
+                )
+            except:
+                pass
+        
+        # Stop dashboard last (it will handle its own cleanup and exit)
+        if self.dashboard:
+            try:
+                self.dashboard.running = False
+                # Dashboard's on_closing will handle shutdown
+            except:
+                pass
         
         logger.info("Shutdown complete")
+        
+        # Force exit to ensure all threads stop
+        import os
+        os._exit(0)
     
     def _save_model(self):
         """Save model checkpoint"""

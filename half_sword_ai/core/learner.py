@@ -21,6 +21,7 @@ from half_sword_ai.config import config
 from half_sword_ai.core.model import HalfSwordPolicyNetwork
 from half_sword_ai.learning.replay_buffer import PrioritizedReplayBuffer
 from half_sword_ai.learning.model_tracker import ModelTracker
+from half_sword_ai.learning.autonomous_learner import AutonomousLearningManager
 from half_sword_ai.monitoring.performance_monitor import PerformanceMonitor
 
 # Import DQN model for type checking
@@ -40,10 +41,11 @@ class LearnerProcess:
     """
     
     def __init__(self, shared_model, replay_buffer: PrioritizedReplayBuffer, 
-                 performance_monitor: PerformanceMonitor = None):
+                 performance_monitor: PerformanceMonitor = None, actor_process=None):
         self.model = shared_model
         self.replay_buffer = replay_buffer
         self.performance_monitor = performance_monitor
+        self.actor_process = actor_process  # Reference to actor for episode tracking
         
         # Detect model type (DQN vs PPO)
         self.is_dqn = DQN_AVAILABLE and isinstance(self.model, DQNNetwork)
@@ -117,6 +119,14 @@ class LearnerProcess:
         self.last_performance_check = time.time()
         self.performance_check_interval = 30.0  # Check every 30 seconds
         
+        # Autonomous learning manager for continuous self-improvement
+        self.autonomous_learner = AutonomousLearningManager(
+            model=shared_model,
+            replay_buffer=replay_buffer,
+            performance_monitor=performance_monitor
+        )
+        logger.info("🤖 Autonomous Learning Manager integrated - Bot will continuously improve itself!")
+        
         # Experience replay improvements
         self.td_error_history = deque(maxlen=500)
         self.value_error_history = deque(maxlen=500)
@@ -167,11 +177,46 @@ class LearnerProcess:
                 if current_time - last_status_log >= 30.0:
                     stats = self.model_tracker.get_training_stats() if hasattr(self.model_tracker, 'get_training_stats') else {}
                     avg_loss = stats.get('avg_loss', 0) if stats else 0
+                    
+                    # Get autonomous learning stats
+                    auto_stats = self.autonomous_learner.get_learning_stats()
+                    
                     logger.info(f"[LEARNER SUMMARY] Updates: {self.update_count} | "
                                f"Avg Loss: {avg_loss:.4f} | "
                                f"Buffer: {buffer_size} | "
                                f"LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+                    logger.info(f"[AUTONOMOUS LEARNING] Episodes: {auto_stats['total_episodes']} | "
+                               f"Best Performance: {auto_stats['best_performance']:.2f} | "
+                               f"Exploration: {auto_stats['exploration_rate']:.3f} | "
+                               f"Stage: {auto_stats['curriculum_stage']}")
                     last_status_log = current_time
+                    
+                    # Autonomous learning: evaluate performance and update curriculum
+                    if self.update_count - self.autonomous_learner.last_evaluation >= self.autonomous_learner.evaluation_interval:
+                        self.autonomous_learner.evaluate_performance(self.update_count)
+                        self.autonomous_learner.update_curriculum()
+                        self.autonomous_learner.update_exploration_rate()
+                        self.autonomous_learner.last_evaluation = self.update_count
+                    
+                    # Autonomous learning: save checkpoints
+                    if self.autonomous_learner.should_save_checkpoint(self.update_count):
+                        self.autonomous_learner.save_checkpoint(self.update_count, self.optimizer.state_dict())
+                    
+                    # Autonomous learning: save best model
+                    if (self.update_count - self.autonomous_learner.last_best_model_save) >= self.autonomous_learner.best_model_save_interval:
+                        self.autonomous_learner.save_best_model(self.update_count)
+                    
+                    # Autonomous learning: update performance from episode metrics
+                    if self.performance_monitor and len(self.performance_monitor.episode_rewards) > 0:
+                        # Get latest episode data
+                        latest_reward = self.performance_monitor.episode_rewards[-1] if self.performance_monitor.episode_rewards else 0
+                        latest_length = self.performance_monitor.current_episode.get('frame_count', 0) if self.performance_monitor.current_episode else 0
+                        
+                        # Only update if we have new episode data
+                        if (not hasattr(self, '_last_episode_count') or 
+                            self.performance_monitor.episode_count > getattr(self, '_last_episode_count', 0)):
+                            self.autonomous_learner.update_performance(latest_reward, latest_length)
+                            self._last_episode_count = self.performance_monitor.episode_count
                     
             except Exception as e:
                 logger.error(f"Learner error: {e}", exc_info=True)
@@ -383,6 +428,11 @@ class LearnerProcess:
         self.scheduler.step(total_loss.item())
         current_lr = self.optimizer.param_groups[0]['lr']
         
+        # Autonomous learning: adapt learning rate based on performance
+        training_time = time.time() - (getattr(self, '_training_start_time', time.time()))
+        self.autonomous_learner.adapt_learning_rate(self.optimizer, total_loss.item())
+        self.autonomous_learner.record_training_update(total_loss.item(), self.update_count + 1, training_time)
+        
         # Update model tracker with enhanced metrics
         self.update_count += 1
         
@@ -390,6 +440,22 @@ class LearnerProcess:
         human_in_batch = sum(1 for exp in experiences if exp.get("human_intervention", False))
         # human_action_count was calculated earlier from recent_experiences (line 206-207)
         # It's already in scope, so we can use it directly
+        
+        # Track YOLO-enhanced training for proof
+        # Check if experiences contain YOLO-detected frames (via rewards that include YOLO data)
+        yolo_enhanced_count = sum(1 for exp in experiences if exp.get('reward', 0) != 0)
+        
+        # Record training batch with YOLO data (if actor has proof tracker)
+        if hasattr(self, 'actor') and self.actor and hasattr(self.actor, 'yolo_proof_tracker'):
+            self.actor.yolo_proof_tracker.record_training_batch(len(experiences), yolo_enhanced_count)
+        
+        # Log YOLO proof in training (every 50 steps)
+        if self.update_count % 50 == 0:
+            logger.info(f"[YOLO LEARNING PROOF] Step {self.update_count} | "
+                      f"Training on {len(experiences)} experiences | "
+                      f"Human actions: {human_in_batch}/{len(experiences)} | "
+                      f"Loss: {total_loss.item():.4f} | "
+                      f"YOLO-enhanced samples: {yolo_enhanced_count}/{len(experiences)} ({100*yolo_enhanced_count/max(1, len(experiences)):.1f}%)")
         
         # Update curriculum if enabled
         if self.curriculum_enabled:

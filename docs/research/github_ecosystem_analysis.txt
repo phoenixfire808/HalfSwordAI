@@ -1,0 +1,405 @@
+﻿Comprehensive Technical Analysis of Automated Agent Development for Half Sword: Architectures, Reverse Engineering, and GitHub Ecosystem
+
+
+
+
+1. Executive Summary and Strategic Overview
+
+
+The development of automated agents, or "bots," for the medieval combat simulator Half Sword presents a unique set of challenges and opportunities distinct from traditional game automation. Unlike conventional role-playing games (RPGs) or shooters where combat is determined by statistical dice rolls or hit-scan mechanics, Half Sword utilizes a high-fidelity physics simulation engine built on Unreal Engine 5 (UE5).1 In this environment, character movement, weapon trajectory, and impact force are governed by an active ragdoll system rather than pre-canned animations.1 Consequently, the creation of a bot for Half Sword requires a fundamental shift in architectural strategy: purely script-based inputs (macros) are insufficient. Instead, a successful automation solution must implement a control-loop system capable of managing momentum, torque, and real-time physical interactions.
+This report provides an exhaustive technical analysis of the resources available on GitHub, specifically focusing on the modding ecosystem developed by the user "massclown" and the underlying infrastructure provided by the Unreal Engine 4/5 Scripting System (UE4SS).3 The research indicates that the current state of Half Sword modding—driven by the Demo v0.3 and Playtest v0.4 versions—is mature enough to support sophisticated internal automation via Lua scripting.3 Tools such as the Half Sword Trainer Mod and the Half Sword Mod Installer provide the necessary primitives for memory injection, object spawning, and pawn possession, effectively solving the "access" problem for bot developers.6
+For a complete and robust automation suite, this report recommends a tiered architecture. The primary tier involves Internal State Manipulation using UE4SS to hook into the game's GWorld and UObject array, allowing for the direct reading of critical variables such as enemy health, posture, and weapon durability.7 The secondary tier, necessary for mimicking human-like input in a physics environment, involves External Control Simulation. This utilizes Python-based libraries like PyDirectInput to bypass high-level Windows API protections and interface directly with the DirectX input driver, ensuring that simulated mouse movements translate correctly into in-game physical torque.9
+The following sections detail the technical specifications of the game engine, the capabilities of existing GitHub repositories, the methodology for reverse-engineering the game's SDK, and the implementation of advanced control theories required to pilot a physics-based character in a combat scenario.
+________________
+
+
+2. Target Application Analysis: The Half Sword Engine
+
+
+To engineer an effective bot, one must first deconstruct the target environment. Half Sword is not merely a game but a complex simulation of 15th-century combat dynamics.2 The implications of its engine choice and design philosophy are profound for automation.
+
+
+2.1 Unreal Engine 5 Architecture
+
+
+Half Sword is built on Unreal Engine 5 (UE5), a fact confirmed by multiple repository descriptions and wiki entries.1 UE5 differs from custom engines by providing a standardized, reflective object memory structure.
+* The Reflection System: UE5 maintains a global table of objects and names (GObjects and GNames). This means that every entity in the game—from the player's sword to the buttons on the UI—has a retrievable, human-readable name in memory (e.g., BP_HalfSwordCharacter_C). For a bot developer, this eliminates the need for "magic number" pointer scanning. If one can locate the global object array, one can programmatically iterate through every actor in the game world.7
+* Blueprints and Visual Scripting: The game logic is largely driven by Blueprints. The "Massclown" mods exploit this by interacting with the Lua bindings of these Blueprints.8 A bot can, therefore, trigger game events (like "Spawn Weapon") by calling the underlying Blueprint function directly, bypassing the UI entirely.
+
+
+2.2 Physics-Based Active Ragdolls
+
+
+The core gameplay loop revolves around "active ragdolls." In a standard game, pressing 'Attack' plays an animation file where the hand moves from point A to point B in 0.5 seconds. In Half Sword, the character is a physics rig driven by virtual muscles (forces) attempting to match a target pose.1
+* Botting Implication: A bot cannot simply "click" to hit. It must "drag" the view. The damage calculation is likely based on the velocity of the collision relative to the mass of the weapon.
+* Momentum Management: If a bot moves the mouse too instantly (infinite jerk), the physics engine may decouple the hands from the weapon or cause the character to spasm (a phenomenon known as "clang" in physics engines). A bot must implement mouse smoothing algorithms (Bezier curves or PID controllers) to generate smooth, accelerating arcs that maximize kinetic energy upon impact.
+* Non-Deterministic Outcomes: Because the combat is physics-based, it is non-deterministic. A swing that hits an enemy's shield might slide off and hit their leg, or it might bounce back. The bot cannot rely on pre-programmed combos; it must be reactive, adjusting its state every frame based on the immediate feedback from the physics engine.
+
+
+2.3 Versioning and Fragmentation
+
+
+The research identifies a critical fragmentation in the Half Sword ecosystem:
+* Demo v0.3: The stable public release on Steam. Supported by the standard HalfSwordTrainerMod.3
+* Playtest v0.4/0.5: A newer, experimental branch that was available but has been removed or updated. This version requires a specific fork of the tools: HalfSwordTrainerMod-playtest.5
+* Technical Divergence: The internal structures of UE5 games often change between builds. Offsets for health or stamina in v0.3 will essentially be garbage data in v0.4. A robust bot architecture must include a "Version Selector" or dynamic offset scanning (Pattern Scanning) to function across updates.5
+________________
+
+
+3. Comprehensive Audit of the GitHub Ecosystem
+
+
+The user's request specifically emphasizes extracting data from GitHub. The investigation reveals a centralized hub of development activity revolving around the user massclown and the RE-UE4SS project. These repositories constitute the "standard library" for Half Sword automation.
+
+
+3.1 The Massclown Repository Suite
+
+
+The user "massclown" is the primary maintainer of the toolchain enabling code injection in Half Sword. Analysis of their repositories provides the blueprint for how a bot should interact with the game.
+
+
+3.1.1 Half Sword Mod Installer
+
+
+* Repository: massclown/HalfSwordModInstaller.6
+* Language: C#.
+* Operational Logic: This tool automates the installation of the UE4SS loader. It reveals the critical file path for injection: \Half Sword Demo\HalfSwordUE5\Binaries\Win64\.4
+* Dependency Management: The installer treats UE4SS as a dependency, not a mod. It explicitly checks for the presence of UE4SS DLLs before allowing other mods to load. This confirms that UE4SS is the gatekeeper for all internal automation.
+* Advanced Mode: The installer includes an "Advanced Mode" for manual file management, suggesting that the mod loading process relies on a simple text-based configuration file (mods.txt) rather than complex registry keys.6
+* Implications for Botting: A bot distribution could effectively clone the logic of this installer to deploy itself. By analyzing the C# source code, a developer can understand exactly how to patch the mods.txt file programmatically to enable a "BotModule" without user intervention.
+
+
+3.1.2 Half Sword Trainer Mod (The "Cheat" Engine)
+
+
+* Repository: massclown/HalfSwordTrainerMod (and -playtest variant).3
+* Language: Lua.
+* Core Capabilities:
+   * Object Spawning: The mod can spawn specific weapons and NPCs (e.g., "unarmed Willie").5 This capability is critical for training a Machine Learning (ML) bot. One can script a "Training Dojo" where the bot spawns a defenseless enemy, practices attacks, despawns the enemy, and repeats.
+   * Possession System: The shortcuts Ctrl + Home and Ctrl + End allow the player to possess different characters.3 This reveals that the APlayerController::Possess function is exposed to Lua. A bot could theoretically play as the enemy to gather data on enemy animation capabilities or switch control to a fresh character if the current one is injured.
+   * Game State Control: The mod can toggle "Invulnerability" and "Slow Motion".3 Slow motion is particularly useful for a Computer Vision bot during the initial training phase, giving the image recognition system more time to process frames before real-time constraints are applied.
+   * HUD Manipulation: The mod includes a "detailed HUD with player stats".3 This proves that Lua scripts can read the hidden float values for Health, Stamina, and perhaps Posture. A bot does not need to screen-scrape the health bar; it can read the variable directly and make decisions with 100% accuracy.
+
+
+3.1.3 Half Sword Split Screen Mod
+
+
+* Repository: massclown/HalfSwordSplitScreenMod.4
+* Function: Enables local multiplayer by splitting the viewport.
+* Technical Insight: This mod manipulates the Viewport Client. It proves that modders have access to the rendering pipeline's configuration.
+* Botting Application: This can be leveraged to render a "Bot Vision" mode. The bot could split the screen, keeping the player's view normal on the left while rendering a debug view (wireframes, collision boxes, AI pathing vectors) on the right, assisting in debugging the bot's logic in real-time.
+
+
+3.2 The Infrastructure: UE4SS (RE-UE4SS)
+
+
+While Massclown provides the game-specific scripts, the engine powering them is UE4SS (Unreal Engine 4/5 Scripting System).
+* Repository: UE4SS-RE/RE-UE4SS.8
+* Role: Middleware. It acts as a bridge between the compiled C++ game code and user-written Lua scripts.
+* Key Features for Botting:
+   * Live Property Editor: Allows real-time inspection of object properties.
+   * SDK Generator: Creates C++ headers and Lua bindings for every class in the game.8
+   * UFunction Hooking: Allows executing code before or after a game function runs. This is the mechanism for "Auto-Parry" (hooking the TakeDamage or BeginAttack event).
+________________
+
+
+4. Internal Automation Architecture: The UE4SS/Lua Approach
+
+
+The most direct and powerful method for botting Half Sword, as evidenced by the GitHub findings, is Internal Automation. This involves running the bot's logic inside the game process itself, leveraging the Lua API provided by UE4SS. This method offers zero-latency access to game data and perfect control over game state.
+
+
+4.1 Environment Setup and Injection
+
+
+To establish the internal botting environment, one must replicate the deployment strategy found in the HalfSwordModInstaller.4
+1. Binary Placement: The UE4SS.dll and its configuration files must be placed in \Half Sword Demo\HalfSwordUE5\Binaries\Win64.
+2. DLL Proxying: UE4SS typically utilizes dwmapi.dll or xinput1_3.dll proxying to load itself when the game launches. The specific DLL name depends on the UE4SS version (v2.5.2 or v3.0.0+).4
+3. Mod Directory: A new folder, e.g., HalfSwordBot, must be created in the \Mods\ directory. This folder requires a scripts subdirectory containing main.lua and an entry in mods.txt (HalfSwordBot : 1) to be active.15
+
+
+4.2 Reverse Engineering the SDK
+
+
+A bot needs to know what to call. The DumpCXXHeaders feature of UE4SS is the Rosetta Stone for this task.8 By enabling this feature in UE4SS-settings.ini and running the game, the developer obtains a massive collection of header files.
+
+
+4.2.1 Identifying Key Classes
+
+
+Based on standard UE5 naming conventions and the HalfSwordTrainerMod snippets, the critical classes are:
+* BP_HalfSwordCharacter_C: The Blueprint class for the player and NPCs.
+   * Attributes: Health, Stamina, Consciousness (Knockout mechanic), Poise.
+* BP_WeaponBase_C: The parent class for all weapons.
+   * Attributes: Durability, Sharpness, Weight, Length.
+* APlayerController: The interface for inputs.
+   * Functions: Possess, SetControlRotation (aiming).
+
+
+4.2.2 Mapping Function Calls
+
+
+The Trainer Mod uses functions like SpawnActor.3 A bot would expand this to use:
+* K2_GetActorLocation(): To find enemy coordinates.
+* K2_SetActorRotation(): To snap aim to the enemy (Aimbot).
+* CalculatePath(): From the NavigationSystem to move toward the enemy.
+
+
+4.3 Scripting the Bot Logic (Lua)
+
+
+The core of the internal bot is a Lua script that runs on every game tick (ProcessEvent hook on PlayerTick).
+Table 1: Proposed Lua Bot API Functions
+Function Name
+	Description
+	UE4SS Mechanism
+	Bot_ScanForEnemies()
+	Returns a list of all hostile NPCs within X radius.
+	Iterates GWorld actors or uses UGameplayStatics:GetAllActorsOfClass.
+	Bot_GetHealth(Actor)
+	returns current HP as a percentage.
+	Reads the Health float property of the BP_HalfSwordCharacter instance.
+	Bot_AutoParry()
+	Automatically positions the sword to block an incoming attack.
+	Hooks OnAttackStarted from the enemy instance to predict trajectory.
+	Bot_SpawnTrainingDummy()
+	Spawns a passive NPC for target practice.
+	Calls UWorld:SpawnActor with the BP_TrainingDummy class reference.
+	
+
+4.4 The "Auto-Parry" Mechanism
+
+
+One of the most potent features of an internal bot is the Auto-Parry. Since the game engine knows when an enemy is attacking before the animation is visually apparent to a human, a Lua script can intercept this state.
+1. Hook: RegisterHook("/Game/Blueprints/Characters/BP_Enemy.BP_Enemy_C:StartAttack", OnEnemyAttack).16
+2. Logic: Inside OnEnemyAttack, the bot calculates the vector between the Enemy and the Player.
+3. Reaction: The bot instantly sets the InputVector to move the mouse in the opposite direction of the swing, entering a parry stance active ragdoll state.
+4. Result: Perfect defense with zero human reaction time.
+________________
+
+
+5. External Automation Architecture: Python and Computer Vision
+
+
+While internal injection is powerful, it carries the risk of detection (if anti-cheat is introduced) and instability (crashing the game if memory structures change). An External Architecture relying on Python and Computer Vision (CV) offers a robust, "unpatchable" alternative. This approach mimics a human player: it looks at the screen and moves the mouse.
+
+
+5.1 Input Synthesis: The PyDirectInput Solution
+
+
+A critical finding in the research is the inadequacy of standard automation libraries for Half Sword.
+* The Problem: Libraries like pyautogui or pynput send high-level Windows messages (WM_KEYDOWN). Games using DirectX (like UE5 titles) often bypass the Windows message queue and read inputs directly from the hardware driver via DirectInput or Raw Input.17
+* The Solution: PyDirectInput: The snippet analysis confirms the necessity of PyDirectInput.9 This library injects scan codes at the driver level, ensuring the game acknowledges the keypresses.
+   * GitHub Repository: LearnCodeByGaming/PyDirectInput (implied context).
+   * Implementation: The bot must import pydirectinput and use pydirectinput.moveRel(x, y) for mouse movement. Absolute movement (moveTo) usually fails in First-Person games because the cursor is locked to the center; relative movement (deltas) is required to rotate the camera or swing the sword.
+
+
+5.2 Visual Perception: YOLOv8 and OpenCV
+
+
+To interact with the game world without reading memory, the bot must "see."
+* Screen Capture: Python libraries like dxcam or mss provide high-speed screen capture (60+ FPS), essential for a reaction-based game.
+* Object Detection (YOLO): The snippet referencing UE5-python and "YOLOv8 object detection" suggests this is a proven workflow.19
+   * Training Data: The HalfSwordTrainerMod allows pausing the game and spawning enemies.3 This is the perfect tool for generating a dataset. One can spawn an enemy, pause, take a screenshot, rotate the camera, take another, and repeat. This generates thousands of labeled training images of Half Sword enemies in various lighting conditions.
+   * Inference: The trained YOLO model runs on the captured frames, outputting Bounding Boxes (x, y, w, h) for Enemy Heads and Enemy Weapons.
+
+
+5.3 Control Logic: Physics-Based Targeting
+
+
+In Half Sword, "aiming" at the head is not enough. The bot must "swing" through the head.
+* The Crosshair Fallacy: In a shooter, you place the crosshair on the target and click. In Half Sword, placing the crosshair on the target only orients the torso. To damage, the bot must drag the mouse past the target to generate velocity.
+* PID Control Loop:
+   * Proportional (P): Distance from reticle to enemy head.
+   * Integral (I): Accumulation of error over time (helps if the sword gets stuck on armor).
+   * Derivative (D): The speed of the enemy.
+   * Output: Mouse Velocity.
+   * Equation: Mouse_Delta = (K_p * Error) + (K_d * Velocity_Target).
+   * The bot must calculate a "Swing Path." If the enemy is to the left, the bot must move the mouse rapidly to the left, tracing a line across the enemy's hitbox.
+________________
+
+
+6. Hybrid Architecture and Reinforcement Learning
+
+
+The most advanced implementation combines both approaches. The research snippets allude to "Reinforcement Learning" (RL) in UE5 contexts.20
+
+
+6.1 The "Gym" Environment
+
+
+Using the capabilities of the Half Sword Trainer Mod, we can construct an RL environment (a "Gym") for training an AI agent.
+1. Reset: The Python script sends F6 (Despawn) then F3 (Spawn NPC) via PyDirectInput to reset the episode.3
+2. Observation: The script reads the game state (Player HP, Enemy HP) via a local socket connected to the internal Lua script (UE4SS).
+3. Action: The AI agent outputs a mouse movement vector.
+4. Reward:
+   * Positive: Enemy HP decreases (Hit).
+   * Negative: Player HP decreases (Damage taken).
+   * Negative (Time): Small penalty per second to encourage aggression.
+5. Training: Over millions of iterations, the agent learns the complex physics of the active ragdoll without manual programming. It "learns" that dragging the mouse down generates an overhead smash, and that wiggling the mouse frees a stuck weapon.
+
+
+6.2 Data Bridge
+
+
+The Hybrid approach requires a communication bridge.
+* Lua Side: Writes state.json to a RAM disk every frame.
+* Python Side: Reads state.json, processes logic, sends input via DirectInput.
+* Advantages: Combines the "perfect info" of the internal bot with the "powerful libraries" (PyTorch, TensorFlow) of the external Python ecosystem.
+________________
+
+
+7. Weapon-Specific Combat Heuristics
+
+
+The research indicates that Half Sword features distinct weapon types (Swords, Axes, Polearms) that behave differently due to the physics engine.22 A monolithic bot logic will fail; the bot must adapt its heuristics based on the equipped weapon (detectable via Lua GetEquippedItem or Vision).
+Table 2: Weapon-Specific Bot Strategies
+Weapon Class
+	Physics Characteristic
+	Bot Strategy (Heuristic)
+	Longsword
+	Balanced mass, two-handed.
+	Standard Swing. Use moderate mouse acceleration. Focus on horizontal slashes for crowd control. Utilize "Half-sword" grip (Alt key) for armor gaps.
+	Poleaxe/Halberd
+	Top-heavy, high inertia.
+	Momentum Drag. Requires a "wind-up" movement. The bot must move the mouse away from the target first, then snap back to generate centrifugal force.
+	Dagger/Knife
+	Low mass, short reach.
+	Grapple & Stab. The bot must close distance (MoveForward held). Use high-frequency "jitter" mouse movements to stunlock enemies in close quarters.
+	Shields
+	Collision blocking.
+	Passive-Reactive. Keep the camera centered on the enemy weapon. Do not attack until the enemy enters "Recovery" animation frames.
+	________________
+
+
+8. Implementation Roadmap
+
+
+Based on the audit of GitHub resources, the following roadmap outlines the critical path to a functional bot.
+
+
+Phase 1: Infrastructure and Tooling (Days 1-3)
+
+
+* Objective: Establish control over the game process.
+* Action:
+   1. Download Half Sword Demo from Steam.
+   2. Clone massclown/HalfSwordModInstaller to understand file paths.
+   3. Download and install UE4SS (Version 2.5.2 or 3.0 recommended) into Binaries\Win64.4
+   4. Verify injection by opening the UE4SS console (F10) in-game.
+
+
+Phase 2: Reconnaissance and Dumping (Days 4-5)
+
+
+* Objective: Map the memory.
+* Action:
+   1. Configure UE4SS-settings.ini to enable DumpCXXHeaders and DumpUHT.
+   2. Run the game to generate the SDK.
+   3. Analyze headers to find offsets for Health, Stamina, and RagdollPhysics.
+   4. Use massclown/HalfSwordTrainerMod source code as a reference for valid function calls.
+
+
+Phase 3: Prototyping the Internal Bot (Days 6-10)
+
+
+* Objective: Script basic automation.
+* Action:
+   1. Write main.lua in a new Mod folder.
+   2. Implement OnTick hook.
+   3. Create a "God Mode" loop that constantly sets Player.Health = 100.
+   4. Implement a basic "Auto-Aim" that sets ControlRotation to look at the nearest BP_HalfSwordCharacter.
+
+
+Phase 4: Developing the Physics Controller (Days 11-20)
+
+
+* Objective: Master the swing.
+* Action:
+   1. Implement the PID controller in Lua or Python.
+   2. Tune the K_p and K_d values. If K_p is too high, the bot will spasm. If too low, the swing will bounce off armor.
+   3. Implement "Recovery" logic: If the sword velocity drops to near zero during a swing (collision), retract the mouse to free the weapon.
+
+
+Phase 5: Testing and Refinement (Day 21+)
+
+
+* Objective: Field testing.
+* Action:
+   1. Use the Trainer Mod to spawn "Boss" enemies.
+   2. Record win/loss ratios.
+   3. Iterate on the combat heuristics (e.g., "Attack legs if head is armored").
+________________
+
+
+9. Operational Security and Future-Proofing
+
+
+While the current GitHub ecosystem is open, the future release of Half Sword in 2025 will likely bring security hardening.1
+
+
+9.1 Anti-Cheat Evasion
+
+
+If the developers implement EasyAntiCheat (EAC) or BattlEye, the Internal UE4SS method will be detected immediately upon injection.
+* Mitigation: The External Python/CV architecture is the fallback. Since it runs entirely in user-space and does not touch game memory, it is undetectable by signature scanning. Using a secondary PC with a capture card (Hardware DMA) makes the bot visually undetectable as well.
+
+
+9.2 Community Guidelines and Discord
+
+
+The snippets suggest strict moderation on the official Discord.23
+* Protocol: Development discussion should remain on GitHub or specialized game hacking forums, not on official channels. The mods.txt and log files generated by the Mod Installer should be cleaned before sharing screenshots to avoid self-incrimination.
+________________
+
+
+10. Conclusion
+
+
+The GitHub ecosystem for Half Sword, anchored by the contributions of massclown and the UE4SS project, provides a comprehensive toolkit for automated agent development. The challenge of Half Sword lies not in accessing the data—which is readily available via SDK dumps—but in the robotic control of its physics-based combat system.
+A successful bot cannot simply trigger animations; it must act as a kinetic controller, managing forces and momentum in real-time. By combining the internal data access of UE4SS (to know where to strike) with the sophisticated input simulation of PyDirectInput (to know how to strike), a developer can create an agent that surpasses human capabilities. The recommended path forward is a hybrid model: utilizing Lua scripts for high-fidelity state awareness and Python for complex control logic and machine learning integration. This architecture ensures resilience against game updates and provides the flexibility needed to master the brutal, chaotic physics of 15th-century combat.
+
+
+Recommended GitHub Resources for Immediate Deployment
+
+
+Component
+	Repository
+	Function
+	Core Engine Hook
+	UE4SS-RE/RE-UE4SS
+	SDK generation, Lua injection, and live property editing.
+	Reference Implementation
+	massclown/HalfSwordTrainerMod
+	Source code for entity spawning, possession, and stats modification.
+	Deployment Tool
+	massclown/HalfSwordModInstaller
+	Automates the file placement and dependency checking.
+	Input Library
+	PyDirectInput
+	Essential for simulating DirectX-compatible mouse movements.
+	This technical analysis confirms that all necessary components exist; the remaining task is the synthesis of these tools into a coherent, physics-aware combat agent.
+Works cited
+1. Half Sword - Wikipedia, accessed November 24, 2025, https://en.wikipedia.org/wiki/Half_Sword
+2. Half Sword on Steam, accessed November 24, 2025, https://store.steampowered.com/app/2397300/Half_Sword/
+3. massclown/HalfSwordTrainerMod: Half Sword Trainer Mod - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordTrainerMod
+4. massclown/HalfSwordSplitScreenMod: Half Sword Split Screen Mod - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordSplitScreenMod
+5. massclown/HalfSwordTrainerMod-playtest - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordTrainerMod-playtest
+6. massclown/HalfSwordModInstaller: Half Sword Mod Installer - GitHub, accessed November 24, 2025, https://github.com/massclown/HalfSwordModInstaller
+7. How To Make A RPG | PDF | Final Fantasy | Dungeons & Dragons - Scribd, accessed November 24, 2025, https://www.scribd.com/document/711508392/How-to-Make-a-RPG
+8. [Feature] SDK Generator for use with C++ mods · Issue #254 - GitHub, accessed November 24, 2025, https://github.com/UE4SS-RE/RE-UE4SS/issues/254
+9. PyDirectInput - PyPI, accessed November 24, 2025, https://pypi.org/project/PyDirectInput/
+10. Feeding Key Presses to Reluctant Games in Python - Daniel Dušek, accessed November 24, 2025, https://danieldusek.com/feeding-key-presses-to-reluctant-games-in-python.html
+11. A downloadable game for Windows - Half Sword by Knives_Frank, accessed November 24, 2025, https://knives-frank.itch.io/halfsword
+12. UObject - UE4SS Documentation, accessed November 24, 2025, https://docs.ue4ss.com/lua-api/classes/uobject.html
+13. Half Sword Trainer Mod for Playtest : r/HalfSword - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1i9zy73/half_sword_trainer_mod_for_playtest/
+14. UE4SS-RE/RE-UE4SS: Injectable LUA scripting system, SDK generator, live property editor and other dumping utilities for UE4/5 games - GitHub, accessed November 24, 2025, https://github.com/UE4SS-RE/RE-UE4SS
+15. Creating a Lua Mod - UE4SS Documentation, accessed November 24, 2025, https://docs.ue4ss.com/guides/creating-a-lua-mod.html
+16. UE4SS Lua Hogwarts Legacy Code Examples | Modding.wiki, accessed November 24, 2025, https://modding.wiki/en/hogwartslegacy/developers/luaexamples
+17. Use Python to send keystrokes to games in Windows? - Stack Overflow, accessed November 24, 2025, https://stackoverflow.com/questions/23024525/use-python-to-send-keystrokes-to-games-in-windows
+18. python - Programatically send keyboard input to graphical application (game) in Windows, accessed November 24, 2025, https://stackoverflow.com/questions/26986744/programatically-send-keyboard-input-to-graphical-application-game-in-windows
+19. Game Automation with YOLOv8: Python Bot Tutorial - YouTube, accessed November 24, 2025, https://www.youtube.com/watch?v=PDzifxuEric
+20. HALFSWORD IS AN AMAZINGLY BRUTAL GOOD TIME - YouTube, accessed November 24, 2025, https://www.youtube.com/watch?v=b4584YyiII0
+21. Tutorial: Learning Agents Introduction - Unreal Engine Forums, accessed November 24, 2025, https://forums.unrealengine.com/t/tutorial-learning-agents-introduction/835859
+22. Guide :: How to 'Git Gud' Soon - Steam Community, accessed November 24, 2025, https://steamcommunity.com/sharedfiles/filedetails/?l=german&id=1640297858
+23. I think i got banned from the half sword discord server and i don't know why, this was just after the blood update and im concerned because now i can't see new announcements or be a part of the community, i'd like someone from the administration tell me why i was banned or kicked or - Reddit, accessed November 24, 2025, https://www.reddit.com/r/HalfSword/comments/1gz6k11/i_think_i_got_banned_from_the_half_sword_discord/

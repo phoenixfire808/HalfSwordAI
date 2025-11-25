@@ -52,15 +52,13 @@ class YOLODetector:
         self.multi_scale_enabled = True
         self.scale_factors = [0.8, 1.0, 1.2]  # Different scales to try
         
-        # Game-specific classes (can be customized)
+        # Game-specific classes - Updated to match Half Sword v5 dataset
+        # Classes: Blood, Enemy, Player, You Won
         self.class_names = {
-            0: 'enemy',
-            1: 'weapon',
-            2: 'player',
-            3: 'health_indicator',
-            4: 'stamina_indicator',
-            5: 'attack_indicator',
-            6: 'defense_indicator'
+            0: 'Blood',
+            1: 'Enemy',
+            2: 'Player',
+            3: 'You Won'
         }
         
         if YOLO_AVAILABLE:
@@ -71,9 +69,23 @@ class YOLODetector:
     def _init_model(self):
         """Initialize YOLO model"""
         try:
-            if self.model_path and os.path.exists(self.model_path):
-                logger.info(f"Loading custom YOLO model from {self.model_path}")
-                self.model = YOLO(self.model_path)
+            # Check config for custom model if model_path not provided
+            model_path_to_use = self.model_path
+            if not model_path_to_use and config.YOLO_USE_CUSTOM_MODEL and config.YOLO_MODEL_PATH:
+                model_path_to_use = config.YOLO_MODEL_PATH
+            
+            # Resolve relative paths
+            if model_path_to_use:
+                if not os.path.isabs(model_path_to_use):
+                    # Make path relative to project root
+                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    model_path_to_use = os.path.join(project_root, model_path_to_use)
+                    model_path_to_use = os.path.normpath(model_path_to_use)
+            
+            if model_path_to_use and os.path.exists(model_path_to_use):
+                logger.info(f"Loading custom Half Sword YOLO model from {model_path_to_use}")
+                self.model = YOLO(model_path_to_use)
+                logger.info(f"Model classes: {list(self.class_names.values())}")
             else:
                 # Use pretrained YOLOv8n (nano - fastest) or YOLOv8s (small - balanced)
                 logger.info("Loading pretrained YOLOv8n model (will need custom training for game-specific objects)")
@@ -86,16 +98,17 @@ class YOLODetector:
             logger.info(f"YOLO model loaded on {device}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize YOLO model: {e}")
+            logger.error(f"Failed to initialize YOLO model: {e}", exc_info=True)
             self.model = None
     
-    def detect(self, frame: np.ndarray, use_tracking: bool = True) -> Dict[str, any]:
+    def detect(self, frame: np.ndarray, use_tracking: bool = True, full_screen_frame: np.ndarray = None) -> Dict[str, any]:
         """
         Enhanced detection with multi-scale and temporal tracking
         
         Args:
-            frame: Input frame (grayscale or RGB)
+            frame: Input frame (grayscale or RGB) - small region for RL
             use_tracking: Whether to use temporal tracking
+            full_screen_frame: Optional full-screen frame for better YOLO detection
             
         Returns:
             Dictionary with detections, bounding boxes, and metadata
@@ -104,11 +117,32 @@ class YOLODetector:
             return self._get_empty_detection()
         
         try:
-            # Convert grayscale to RGB if needed
-            if len(frame.shape) == 2:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+            # Use full screen frame if provided (model was trained on full screen images)
+            if full_screen_frame is not None:
+                if len(full_screen_frame.shape) == 2:
+                    frame_rgb = cv2.cvtColor(full_screen_frame, cv2.COLOR_GRAY2RGB)
+                else:
+                    frame_rgb = full_screen_frame.copy()
+                original_shape = frame_rgb.shape[:2]
+                # Resize to model's training size (512x512)
+                target_size = 512
+                frame_rgb = cv2.resize(frame_rgb, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+                scale_factor_x = target_size / original_shape[1]
+                scale_factor_y = target_size / original_shape[0]
+                logger.debug(f"Using full-screen frame: {original_shape} -> {target_size}x{target_size}")
             else:
-                frame_rgb = frame.copy()
+                # Fallback to small frame (less accurate)
+                if len(frame.shape) == 2:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                else:
+                    frame_rgb = frame.copy()
+                
+                original_shape = frame_rgb.shape[:2]
+                target_size = 512
+                frame_rgb = cv2.resize(frame_rgb, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+                scale_factor_x = target_size / original_shape[1]
+                scale_factor_y = target_size / original_shape[0]
+                logger.debug(f"Resized small frame from {original_shape} to {target_size}x{target_size}")
             
             # Multi-scale detection
             all_detections = []
@@ -139,8 +173,21 @@ class YOLODetector:
             else:
                 # Single scale detection
                 results = self.model(frame_rgb, conf=self.confidence_threshold, verbose=False)
-                detections = self._parse_results(results[0], frame.shape)
+                detections = self._parse_results(results[0], frame_rgb.shape)
                 all_detections = detections.get('objects', [])
+            
+            # Scale bounding boxes back to original frame size
+            if scale_factor_x != 1.0 or scale_factor_y != 1.0:
+                for obj in all_detections:
+                    bbox = obj['bbox']
+                    obj['bbox'] = [
+                        bbox[0] / scale_factor_x,
+                        bbox[1] / scale_factor_y,
+                        bbox[2] / scale_factor_x,
+                        bbox[3] / scale_factor_y
+                    ]
+                    obj['center'] = [obj['center'][0] / scale_factor_x, obj['center'][1] / scale_factor_y]
+                    obj['size'] = [obj['size'][0] / scale_factor_x, obj['size'][1] / scale_factor_y]
             
             inference_time = time.time() - inference_start
             
@@ -302,8 +349,11 @@ class YOLODetector:
             confidence = float(box.conf[0].cpu().numpy())
             class_id = int(box.cls[0].cpu().numpy())
             
-            # Get class name
-            class_name = result.names.get(class_id, f'class_{class_id}')
+            # Get class name from model (use our class_names dict if available, otherwise use model's names)
+            if class_id in self.class_names:
+                class_name = self.class_names[class_id]
+            else:
+                class_name = result.names.get(class_id, f'class_{class_id}')
             
             # Calculate center and dimensions
             center_x = (x1 + x2) / 2
@@ -324,13 +374,16 @@ class YOLODetector:
             detections['objects'].append(detection)
             detections['count'] += 1
             
-            # Categorize detections
-            if 'person' in class_name.lower() or class_id in [0]:  # COCO person class or custom enemy
+            # Categorize detections based on Half Sword v5 dataset classes
+            if class_name == 'Enemy' or class_id == 1:
                 detections['enemies'].append(detection)
-            elif 'weapon' in class_name.lower() or 'sword' in class_name.lower():
+            elif class_name == 'Weapon' or 'weapon' in class_name.lower() or 'sword' in class_name.lower():
                 detections['weapons'].append(detection)
-            elif 'player' in class_name.lower():
+            elif class_name == 'Player' or class_id == 2:
                 detections['player'] = detection
+            # Also check for generic 'person' class (from pretrained models)
+            elif 'person' in class_name.lower() and class_id not in [0, 1, 2, 3]:
+                detections['enemies'].append(detection)
         
         return detections
     

@@ -117,6 +117,25 @@ class InputMultiplexer:
         self.action_discretizer = None
         self.use_discrete_actions = config.USE_DISCRETE_ACTIONS  # Use config setting
         
+        # Physics-Based Mouse Controller (PID + Bezier smoothing)
+        self.physics_controller = None
+        if config.USE_PHYSICS_CONTROLLER:
+            try:
+                from half_sword_ai.input.physics_controller import PhysicsMouseController, PIDParams
+                pid_params = PIDParams(
+                    kp=config.PID_KP,
+                    ki=config.PID_KI,
+                    kd=config.PID_KD,
+                    max_output=config.PID_MAX_OUTPUT
+                )
+                self.physics_controller = PhysicsMouseController(
+                    pid_params=pid_params,
+                    use_bezier=config.USE_BEZIER_SMOOTHING
+                )
+                logger.info("✅ Physics controller initialized (PID + Bezier smoothing)")
+            except Exception as e:
+                logger.warning(f"Physics controller initialization failed: {e} - using direct injection")
+        
         if DIRECTINPUT_AVAILABLE:
             try:
                 self.direct_input = DirectInput()
@@ -190,9 +209,11 @@ class InputMultiplexer:
         
         # Bot injection tracking (enhanced)
         self.bot_injecting = False
+        self.bot_injection_lock = threading.Lock()  # Lock for thread-safe bot injection flag
         self.last_bot_injection_time = 0
         self.bot_injection_cooldown = 0.5  # Increased to 500ms to prevent detecting bot's own movements
         self.bot_movement_buffer = deque(maxlen=10)  # Track bot's own movements
+        self.injection_clear_timer = None  # Timer for clearing injection flag
         
         # Anti-jitter system
         self.jitter_filter_enabled = True
@@ -262,6 +283,18 @@ class InputMultiplexer:
     def stop(self):
         """Stop the input multiplexer"""
         self.running = False
+        
+        # Cancel injection clear timer if it exists
+        if self.injection_clear_timer:
+            try:
+                self.injection_clear_timer.cancel()
+            except:
+                pass
+        
+        # Clear bot injection flag
+        with self.bot_injection_lock:
+            self.bot_injecting = False
+        
         if self.control_thread:
             self.control_thread.join(timeout=2.0)
         logger.info("Input multiplexer stopped")
@@ -289,6 +322,15 @@ class InputMultiplexer:
         """Fallback loop using high-level APIs with human detection"""
         while self.running:
             try:
+                # Safety check: Force clear bot_injecting if it's been True for too long (>1 second)
+                # This prevents the flag from getting stuck
+                if self.bot_injecting:
+                    time_since_injection = time.time() - self.last_bot_injection_time
+                    if time_since_injection > 1.0:  # 1 second timeout
+                        logger.warning(f"[INPUT_MUX] bot_injecting flag stuck for {time_since_injection:.2f}s - force clearing")
+                        with self.bot_injection_lock:
+                            self.bot_injecting = False
+                
                 # Always monitor for human input, but ONLY if in AUTONOMOUS mode
                 # Don't check if already in MANUAL mode to prevent fighting for control
                 if self.mode == ControlMode.AUTONOMOUS and not self.bot_injecting:
@@ -302,8 +344,9 @@ class InputMultiplexer:
                         logger.debug(f"[INPUT_MUX] Detection details: consecutive_detections={self.consecutive_human_detections}, bot_injecting={self.bot_injecting}")
                         self.set_mode(ControlMode.MANUAL)
                         self.human_override_count += 1
-                        # Reset bot injection flag to ensure clean handoff
-                        self.bot_injecting = False
+                        # Reset bot injection flag to ensure clean handoff (with lock)
+                        with self.bot_injection_lock:
+                            self.bot_injecting = False
                         logger.debug(f"[INPUT_MUX] Mode switched | human_override_count={self.human_override_count}, bot_injecting={self.bot_injecting}")
                 
                 # Check for timeout (return to bot control if human stops)
@@ -314,12 +357,13 @@ class InputMultiplexer:
                     if time_since_last_input > self.human_timeout:
                         # Use less strict idle check - prioritize timeout over movement check
                         if self._is_human_idle() or time_since_last_input > self.human_timeout * 1.5:
-                            logger.info(f"[INPUT_MUX] Human idle detected ({time_since_last_input:.2f}s) | Switching MANUAL -> AUTONOMOUS")
+                            logger.info(f"[INPUT_MUX] Human idle detected ({time_since_last_input:.2f}s > {self.human_timeout}s) | Switching MANUAL -> AUTONOMOUS")
                             logger.debug(f"[INPUT_MUX] Idle check: time_since_input={time_since_last_input:.2f}s, timeout={self.human_timeout}s, is_idle={self._is_human_idle()}")
                             self.set_mode(ControlMode.AUTONOMOUS)
                             # Reset detection counters to prevent immediate switch back
                             self.consecutive_human_detections = 0
-                            self.bot_injecting = False
+                            with self.bot_injection_lock:
+                                self.bot_injecting = False
                             # Mark that we just switched back - bot should use human actions more aggressively
                             self.just_switched_to_autonomous = True
                             self.switch_to_autonomous_time = current_time
@@ -723,7 +767,8 @@ class InputMultiplexer:
         """Check if human is currently controlling"""
         return self.mode == ControlMode.MANUAL
     
-    def inject_action(self, delta_x: float, delta_y: float, buttons: Dict[str, bool] = None):
+    def inject_action(self, delta_x: float, delta_y: float, buttons: Dict[str, bool] = None, 
+                     use_physics_control: bool = None):
         """
         Enhanced bot action injection with movement prediction and smoothing
         SAFETY: Only injects if in AUTONOMOUS mode and safety_lock is False
@@ -753,31 +798,99 @@ class InputMultiplexer:
             logger.warning(f"[INJECTION BLOCKED] Human movement detected during injection (confidence: {detection_conf:.2f}) - aborting to prevent interference")
             logger.debug(f"[INJECTION BLOCKED] Switching to MANUAL mode | bot_injecting={self.bot_injecting}")
             self.set_mode(ControlMode.MANUAL)
-            self.bot_injecting = False  # Reset flag immediately
+            with self.bot_injection_lock:
+                self.bot_injecting = False  # Reset flag immediately (thread-safe)
             return
         
         logger.debug(f"[INJECTION] Injecting action | delta_x={delta_x:.3f}, delta_y={delta_y:.3f}, buttons={buttons}, mode={self.mode.value}")
         
+        # Apply physics controller if enabled (PID + Bezier smoothing)
+        if self.physics_controller and (use_physics_control is None or use_physics_control):
+            try:
+                import numpy as np
+                # Get current mouse position for physics controller
+                current_pos = np.array([0.0, 0.0])  # Will be updated with actual position
+                if PYAUTOGUI_AVAILABLE and self.last_mouse_pos:
+                    current_pos = np.array([float(self.last_mouse_pos[0]), float(self.last_mouse_pos[1])])
+                
+                # Target position (normalized to screen coordinates)
+                target_pos = current_pos + np.array([delta_x, delta_y]) * self.current_sensitivity
+                
+                logger.debug(f"[INJECTION] Physics controller active | "
+                           f"current_pos=({current_pos[0]:.2f}, {current_pos[1]:.2f}) | "
+                           f"target_pos=({target_pos[0]:.2f}, {target_pos[1]:.2f}) | "
+                           f"raw_delta=({delta_x:.3f}, {delta_y:.3f})")
+                
+                # Compute smooth movement using physics controller
+                smooth_delta = self.physics_controller.compute_movement(target_pos, current_pos)
+                
+                # Convert back to normalized deltas
+                if np.linalg.norm(smooth_delta) > 0.01:
+                    delta_x_before = delta_x
+                    delta_y_before = delta_y
+                    delta_x = smooth_delta[0] / self.current_sensitivity
+                    delta_y = smooth_delta[1] / self.current_sensitivity
+                    logger.debug(f"[INJECTION] Physics controller applied | "
+                               f"delta_before=({delta_x_before:.3f}, {delta_y_before:.3f}) | "
+                               f"delta_after=({delta_x:.3f}, {delta_y:.3f}) | "
+                               f"momentum={self.physics_controller.get_momentum():.4f}")
+            except Exception as e:
+                logger.warning(f"[INJECTION] Physics controller error: {e} - using direct injection", exc_info=True)
+        
         # Apply movement smoothing if enabled
+        smoothing_applied = False
         if self.smoothing_enabled:
+            delta_x_before = delta_x
+            delta_y_before = delta_y
             delta_x, delta_y = self._smooth_movement(delta_x, delta_y)
+            smoothing_applied = True
+            logger.debug(f"[INJECTION] Movement smoothing applied | "
+                        f"delta_before=({delta_x_before:.3f}, {delta_y_before:.3f}) | "
+                        f"delta_after=({delta_x:.3f}, {delta_y:.3f})")
         
         # Scale normalized values to pixels with adaptive sensitivity
         pixel_x = delta_x * self.current_sensitivity
         pixel_y = delta_y * self.current_sensitivity
         
+        logger.debug(f"[INJECTION] Pixel conversion | "
+                    f"normalized=({delta_x:.3f}, {delta_y:.3f}) | "
+                    f"sensitivity={self.current_sensitivity:.2f} | "
+                    f"pixel=({pixel_x:.2f}, {pixel_y:.2f})")
+        
         # Movement prediction for smoother injection
+        prediction_applied = False
         if self.predicted_movement is not None:
+            pixel_x_before = pixel_x
+            pixel_y_before = pixel_y
             # Blend with prediction (80% current, 20% prediction)
             pixel_x = pixel_x * 0.8 + self.predicted_movement[0] * 0.2
             pixel_y = pixel_y * 0.8 + self.predicted_movement[1] * 0.2
+            prediction_applied = True
+            logger.debug(f"[INJECTION] Prediction blending | "
+                        f"pixel_before=({pixel_x_before:.2f}, {pixel_y_before:.2f}) | "
+                        f"prediction={self.predicted_movement} | "
+                        f"pixel_after=({pixel_x:.2f}, {pixel_y:.2f})")
         
         # Clamp to reasonable values
+        pixel_x_before_clamp = pixel_x
+        pixel_y_before_clamp = pixel_y
         pixel_x = max(-500, min(500, pixel_x))
         pixel_y = max(-500, min(500, pixel_y))
         
+        if pixel_x != pixel_x_before_clamp or pixel_y != pixel_y_before_clamp:
+            logger.debug(f"[INJECTION] Pixel clamping applied | "
+                        f"before=({pixel_x_before_clamp:.2f}, {pixel_y_before_clamp:.2f}) | "
+                        f"after=({pixel_x:.2f}, {pixel_y:.2f})")
+        
         # Update prediction
         self.predicted_movement = (pixel_x * 0.3, pixel_y * 0.3)  # Predict slight continuation
+        
+        logger.debug(f"[INJECTION] Pre-injection summary | "
+                    f"final_pixel=({pixel_x:.2f}, {pixel_y:.2f}) | "
+                    f"physics={self.physics_controller is not None} | "
+                    f"smoothing={smoothing_applied} | "
+                    f"prediction={prediction_applied} | "
+                    f"buttons={buttons}")
         
         if INTERCEPTION_AVAILABLE and self.interception:
             # Use interception driver injection
@@ -793,9 +906,10 @@ class InputMultiplexer:
             try:
                 # Only inject if we're still in AUTONOMOUS mode (double-check)
                 if self.mode == ControlMode.AUTONOMOUS and not self.safety_lock:
-                    # Mark that we're injecting to prevent detecting our own movement
-                    self.bot_injecting = True
-                    self.last_bot_injection_time = time.time()
+                    # Mark that we're injecting to prevent detecting our own movement (thread-safe)
+                    with self.bot_injection_lock:
+                        self.bot_injecting = True
+                        self.last_bot_injection_time = time.time()
                     logger.debug(f"Bot injecting action: dx={pixel_x:.1f}, dy={pixel_y:.1f}, cooldown={self.bot_injection_cooldown}s")
                     
                     # Detect if this is an attack swing (large, rapid movement)
@@ -885,26 +999,42 @@ class InputMultiplexer:
                         self.direct_input.set_key_state('q', buttons.get('q', False))
                         self.direct_input.set_key_state('e', buttons.get('e', False))
                     
-                    # Clear injection flag after a short delay
+                    # Clear injection flag after a short delay (with timeout protection)
                     import threading
                     def clear_injection_flag():
-                        time.sleep(0.05)  # 50ms delay
-                        self.bot_injecting = False
-                    threading.Thread(target=clear_injection_flag, daemon=True).start()
+                        try:
+                            time.sleep(0.05)  # 50ms delay
+                            with self.bot_injection_lock:
+                                self.bot_injecting = False
+                        except Exception as e:
+                            logger.error(f"Error clearing injection flag: {e}")
+                            # Force clear on error
+                            with self.bot_injection_lock:
+                                self.bot_injecting = False
+                    
+                    # Cancel previous timer if it exists
+                    if self.injection_clear_timer and self.injection_clear_timer.is_alive():
+                        # Previous timer still running, don't spawn new one
+                        pass
+                    else:
+                        self.injection_clear_timer = threading.Thread(target=clear_injection_flag, daemon=True)
+                        self.injection_clear_timer.start()
                 else:
                     logger.debug(f"Mode changed during injection - aborting (mode={self.mode.value}, lock={self.safety_lock})")
             except Exception as e:
                 logger.error(f"DirectInput injection error: {e}", exc_info=True)
-                self.bot_injecting = False
+                with self.bot_injection_lock:
+                    self.bot_injecting = False
         
         # Fallback to PyAutoGUI (with additional safety)
         elif PYAUTOGUI_AVAILABLE:
             try:
                 # Only inject if we're still in AUTONOMOUS mode (double-check)
                 if self.mode == ControlMode.AUTONOMOUS and not self.safety_lock:
-                    # Mark that we're injecting to prevent detecting our own movement
-                    self.bot_injecting = True
-                    self.last_bot_injection_time = time.time()
+                    # Mark that we're injecting to prevent detecting our own movement (thread-safe)
+                    with self.bot_injection_lock:
+                        self.bot_injecting = True
+                        self.last_bot_injection_time = time.time()
                     
                     # Only inject if movement is significant enough
                     if abs(pixel_x) > 0.1 or abs(pixel_y) > 0.1:
@@ -962,18 +1092,33 @@ class InputMultiplexer:
                         else:
                             pyautogui.keyUp('alt')
                     
-                    # Clear injection flag after a short delay
+                    # Clear injection flag after a short delay (with timeout protection)
                     # This allows the mouse position to update before we check for human movement
                     import threading
                     def clear_injection_flag():
-                        time.sleep(0.05)  # 50ms delay
-                        self.bot_injecting = False
-                    threading.Thread(target=clear_injection_flag, daemon=True).start()
+                        try:
+                            time.sleep(0.05)  # 50ms delay
+                            with self.bot_injection_lock:
+                                self.bot_injecting = False
+                        except Exception as e:
+                            logger.error(f"Error clearing injection flag: {e}")
+                            # Force clear on error
+                            with self.bot_injection_lock:
+                                self.bot_injecting = False
+                    
+                    # Cancel previous timer if it exists
+                    if self.injection_clear_timer and self.injection_clear_timer.is_alive():
+                        # Previous timer still running, don't spawn new one
+                        pass
+                    else:
+                        self.injection_clear_timer = threading.Thread(target=clear_injection_flag, daemon=True)
+                        self.injection_clear_timer.start()
                 else:
                     logger.debug(f"Mode changed during injection - aborting (mode={self.mode.value}, lock={self.safety_lock})")
             except Exception as e:
                 logger.error(f"Action injection error: {e}", exc_info=True)
-                self.bot_injecting = False
+                with self.bot_injection_lock:
+                    self.bot_injecting = False
     
     def get_last_human_input(self) -> Optional[Tuple[float, float, Dict[str, bool]]]:
         """
@@ -1038,8 +1183,14 @@ class InputMultiplexer:
             # Update button hold tracking
             self._update_button_hold_tracking(current_buttons)
             
-            # Update last human input time if there's any input
-            has_input = mouse_delta[0] != 0.0 or mouse_delta[1] != 0.0 or any(current_buttons.values())
+            # Update last human input time if there's any SIGNIFICANT input
+            # CRITICAL FIX: Use noise threshold to prevent jitter from keeping bot in manual mode
+            movement_magnitude = (mouse_delta[0]**2 + mouse_delta[1]**2)**0.5
+            has_significant_movement = movement_magnitude > self.noise_threshold
+            has_button_input = any(current_buttons.values())
+            
+            has_input = has_significant_movement or has_button_input
+            
             if has_input:
                 self.last_human_input_time = time.time()
                 self.last_human_input = (normalized_delta[0], normalized_delta[1], current_buttons.copy())
@@ -1081,7 +1232,8 @@ class InputMultiplexer:
         logger.info("Forcing AUTONOMOUS mode - bot control enabled")
         self.set_mode(ControlMode.AUTONOMOUS)
         self.last_human_input_time = 0  # Reset so it doesn't immediately switch back
-        self.bot_injecting = False  # Reset bot injection flag
+        with self.bot_injection_lock:
+            self.bot_injecting = False  # Reset bot injection flag (thread-safe)
         self.consecutive_human_detections = 0  # Reset detection counter
         # Mark that we just switched - bot should use human actions more aggressively
         self.just_switched_to_autonomous = True

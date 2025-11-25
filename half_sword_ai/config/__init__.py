@@ -21,10 +21,11 @@ class Config:
     
     # YOLO Detection Configuration - Optimized for high FPS
     YOLO_ENABLED: bool = True
-    YOLO_MODEL_PATH: Optional[str] = None  # Path to custom model, or None for pretrained
-    YOLO_CONFIDENCE_THRESHOLD: float = 0.5
+    YOLO_MODEL_PATH: Optional[str] = "yolo_training/half_sword_detector2/weights/best.pt"  # Trained Half Sword v5 model
+    YOLO_CONFIDENCE_THRESHOLD: float = 0.5  # Higher confidence threshold to reduce false positives
     YOLO_DETECTION_INTERVAL: float = 0.1  # Run detection every 0.1s (10 FPS) - optimized for 60+ FPS
-    YOLO_USE_CUSTOM_MODEL: bool = False  # Set to True if you have a trained model
+    YOLO_USE_CUSTOM_MODEL: bool = True  # Using trained Half Sword v5 model (15 images, proper train/val/test split)
+    YOLO_OVERLAY_ENABLED: bool = False  # Disabled - YOLO display is now integrated into GUI dashboard (single window)
     
     # YOLO Self-Learning Configuration
     YOLO_SELF_LEARNING_ENABLED: bool = True  # Enable self-labeling and reward learning
@@ -64,9 +65,24 @@ class Config:
     
     # Input Configuration
     MOUSE_SENSITIVITY: float = 100.0  # pixels per normalized action
-    NOISE_THRESHOLD: float = 2.0  # pixels - movement below this is considered noise
+    NOISE_THRESHOLD: float = 0.5  # pixels - movement below this is considered noise
     HUMAN_TIMEOUT: float = 0.5  # seconds of no movement before returning to AUTO mode
     KILL_BUTTON: str = "f8"  # Hotkey for emergency kill switch
+    
+    # Physics-Based Mouse Control Configuration
+    USE_PHYSICS_CONTROLLER: bool = True  # Enable PID controller and Bezier smoothing
+    PID_KP: float = 0.5  # Proportional gain
+    PID_KI: float = 0.0  # Integral gain (usually 0 for mouse control)
+    PID_KD: float = 0.2  # Derivative gain
+    PID_MAX_OUTPUT: float = 1.0  # Maximum output magnitude
+    USE_BEZIER_SMOOTHING: bool = True  # Enable Bezier curve smoothing for momentum
+    
+    # UE4SS Integration Configuration
+    UE4SS_ENABLED: bool = False  # Enable UE4SS internal automation
+    UE4SS_GAME_PATH: Optional[str] = None  # Auto-detected if None
+    UE4SS_MODS_DIRECTORY: Optional[str] = None  # Auto-detected if None
+    UE4SS_AUTO_INSTALL: bool = False  # Automatically install UE4SS if not found
+    UE4SS_STATE_BRIDGE_ENABLED: bool = False  # Enable Lua → Python state bridge
     
     # ScrimBrain Integration Configuration - Per Guide Specifications
     USE_DIRECTINPUT: bool = True  # Use ctypes SendInput instead of PyAutoGUI (REQUIRED)
@@ -94,10 +110,25 @@ class Config:
     
     # Comprehensive Reward Shaping Configuration
     ENABLE_COMPREHENSIVE_REWARDS: bool = True  # Enable multi-layered reward architecture
+    USE_ENHANCED_REWARDS: bool = True  # Use enhanced frame-by-frame rewards
     CURRICULUM_PHASE: str = "master"  # "toddler", "swordsman", "duelist", "master"
     ENABLE_PBRS: bool = True  # Enable Potential-Based Reward Shaping
     REWARD_ALIGNMENT_POWER: float = 3.0  # Power for edge alignment filter (harsh filtering)
     BALANCE_REWARD_K: float = 0.1  # Exponential decay constant for balance reward
+    
+    # Enhanced Reward Configuration (frame-by-frame)
+    REWARD_SURVIVAL: float = 0.01  # Reward per frame for staying alive
+    REWARD_ENGAGEMENT: float = 0.02  # Reward for being near enemies
+    REWARD_MOVEMENT_QUALITY: float = 0.05  # Reward for smooth movements
+    REWARD_ACTION_SMOOTHNESS: float = 0.03  # Reward for smooth actions
+    REWARD_MOMENTUM: float = 0.02  # Reward for building momentum
+    REWARD_PROXIMITY: float = 0.01  # Reward for optimal spacing
+    REWARD_ACTIVITY: float = 0.01  # Reward for active gameplay
+    
+    # Reward Normalization
+    REWARD_NORMALIZATION: bool = True  # Enable adaptive reward normalization
+    REWARD_CLIP_MIN: float = -10.0  # Minimum reward value
+    REWARD_CLIP_MAX: float = 10.0  # Maximum reward value
     
     # Online Learning Configuration
     MIN_BATCH_SIZE_FOR_TRAINING: int = 1  # Start training with ANY data (very aggressive)

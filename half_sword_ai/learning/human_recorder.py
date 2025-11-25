@@ -398,12 +398,8 @@ class HumanActionRecorder:
     
     def _make_json_serializable(self, obj):
         """Convert numpy types and other non-JSON types to JSON-serializable types"""
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.bool_):
-            return bool(obj)
+        if isinstance(obj, np.generic):
+            return obj.item()
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         elif isinstance(obj, dict):

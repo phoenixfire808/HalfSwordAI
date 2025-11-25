@@ -52,7 +52,7 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         # Get component name from logger name
         component = record.name.split('.')[-1] if '.' in record.name else record.name
-        component_icon = self.COMPONENT_ICONS.get(component, '•')
+        component_icon = self.COMPONENT_ICONS.get(component, '•') if self.use_emojis else ''
         
         # Get emoji for log level
         emoji = self.EMOJIS.get(record.levelname, '') if self.use_emojis else ''
@@ -60,6 +60,25 @@ class ColoredFormatter(logging.Formatter):
         # Get color for log level
         color = self.COLORS.get(record.levelname, '') if self.use_colors else ''
         reset = self.COLORS['RESET'] if self.use_colors else ''
+        
+        # Get message and strip emojis if needed
+        message = record.getMessage()
+        if not self.use_emojis:
+            # Strip emojis from message if emojis are disabled
+            import re
+            emoji_pattern = re.compile(
+                "["
+                "\U0001F600-\U0001F64F"  # emoticons
+                "\U0001F300-\U0001F5FF"  # symbols & pictographs
+                "\U0001F680-\U0001F6FF"  # transport & map symbols
+                "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                "\U00002702-\U000027B0"  # dingbats
+                "\U000024C2-\U0001F251"  # enclosed characters
+                "\U0001F900-\U0001F9FF"  # supplemental symbols and pictographs
+                "\U00002600-\U000026FF"  # miscellaneous symbols
+                "\U00002700-\U000027BF"  # dingbats
+                "]+", flags=re.UNICODE)
+            message = emoji_pattern.sub('', message).strip()
         
         # Format message based on level
         if record.levelname == 'INFO':
@@ -72,16 +91,21 @@ class ColoredFormatter(logging.Formatter):
                     component = name_parts[-1]
             
             # Format: [Component] Message
-            formatted = f"{color}{component_icon} {component.upper()}:{reset} {record.getMessage()}"
+            icon_space = ' ' if component_icon else ''
+            formatted = f"{color}{component_icon}{icon_space}{component.upper()}:{reset} {message}"
         elif record.levelname == 'WARNING':
-            formatted = f"{color}{emoji} {component.upper()}:{reset} {record.getMessage()}"
+            emoji_space = ' ' if emoji else ''
+            formatted = f"{color}{emoji}{emoji_space}{component.upper()}:{reset} {message}"
         elif record.levelname == 'ERROR':
-            formatted = f"{color}{emoji} ERROR [{component}]:{reset} {record.getMessage()}"
+            emoji_space = ' ' if emoji else ''
+            formatted = f"{color}{emoji}{emoji_space}ERROR [{component}]:{reset} {message}"
         elif record.levelname == 'CRITICAL':
-            formatted = f"{color}{self.COLORS['BOLD']}{emoji} CRITICAL [{component}]:{reset} {record.getMessage()}"
+            emoji_space = ' ' if emoji else ''
+            formatted = f"{color}{self.COLORS['BOLD']}{emoji}{emoji_space}CRITICAL [{component}]:{reset} {message}"
         else:
             # DEBUG messages - minimal format
-            formatted = f"{self.COLORS['DIM'] if self.use_colors else ''}{emoji} [{component}]:{reset} {record.getMessage()}"
+            emoji_space = ' ' if emoji else ''
+            formatted = f"{self.COLORS['DIM'] if self.use_colors else ''}{emoji}{emoji_space}[{component}]:{reset} {message}"
         
         return formatted
 
@@ -104,16 +128,33 @@ class StatusLogger:
 
 def setup_pretty_logging(use_colors: bool = True, use_emojis: bool = True):
     """Setup pretty logging for terminal output"""
-    from half_sword_ai.utils.safe_logger import SafeStreamHandler
+    from half_sword_ai.utils.safe_logger import SafeStreamHandler, EmojiFilter
     
     root_logger = logging.getLogger()
     
-    # Remove existing handlers
-    root_logger.handlers.clear()
+    # Remove ALL existing handlers (including from child loggers)
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Also remove handlers from all child loggers
+    for logger_name in logging.Logger.manager.loggerDict:
+        logger = logging.getLogger(logger_name)
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+    
+    # Auto-detect Windows console encoding issues
+    is_windows_console = sys.platform == 'win32' and sys.stdout.encoding in ('cp1252', 'ascii', 'latin-1', 'cp437')
+    if is_windows_console:
+        use_emojis = False  # Force no emojis on Windows console
     
     # Create console handler with safe Unicode handling
     console_handler = SafeStreamHandler(sys.stdout, strip_emojis=not use_emojis)
     console_handler.setLevel(logging.INFO)
+    
+    # Add emoji filter if needed
+    if not use_emojis:
+        console_handler.addFilter(EmojiFilter())
+    
     console_formatter = ColoredFormatter(use_colors=use_colors, use_emojis=use_emojis)
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)

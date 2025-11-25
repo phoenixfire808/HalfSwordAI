@@ -31,6 +31,7 @@ from half_sword_ai.perception.screen_reward_detector import ScreenRewardDetector
 from half_sword_ai.perception.ocr_reward_tracker import OCRRewardTracker
 from half_sword_ai.perception.terminal_state_detector import TerminalStateDetector
 from half_sword_ai.learning.reward_shaper import RewardShaper, CurriculumPhase
+from half_sword_ai.learning.enhanced_reward_shaper import EnhancedRewardShaper
 
 # Use centralized logging setup from agent.py
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class ActorProcess:
         self.watchdog = watchdog
         # LLM removed
         self.perf_monitor = performance_monitor
+        self.yolo_overlay = None  # Will be set by agent if overlay is enabled
         
         # Detect if using DQN (ScrimBrain-style)
         self.is_dqn = DQN_AVAILABLE and isinstance(self.model, DQNNetwork)
@@ -66,12 +68,16 @@ class ActorProcess:
         # Initialize vision processor with YOLO
         self.vision_processor = VisionProcessor(screen_capture)
         
-        # Initialize YOLO self-learning system
-        if config.YOLO_SELF_LEARNING_ENABLED and self.vision_processor.yolo_detector:
-            self.yolo_self_learner = YOLOSelfLearner(self.vision_processor.yolo_detector)
-            logger.info("🧠 YOLO self-learning enabled - Building model from rewards!")
+        # Initialize YOLO self-learning system (lazy - will init YOLO on first use)
+        if config.YOLO_SELF_LEARNING_ENABLED:
+            # Will be initialized when YOLO detector is first loaded
+            self.yolo_self_learner = None
+            logger.info("YOLO self-learning enabled - Will initialize when YOLO loads")
         else:
             self.yolo_self_learner = None
+        
+        # Initialize YOLO proof tracker for evidence that YOLO is working
+        self.yolo_proof_tracker = YOLOProofTracker()
         
         # Initialize screen-based reward detector (ScrimBrain-style)
         self.screen_reward_detector = ScreenRewardDetector()
@@ -112,11 +118,37 @@ class ActorProcess:
                 }
                 curriculum_phase = phase_map.get(config.CURRICULUM_PHASE.lower(), CurriculumPhase.MASTER)
                 
-                self.reward_shaper = RewardShaper(
-                    curriculum_phase=curriculum_phase,
-                    gamma=config.GAMMA,
-                    enable_pbrs=config.ENABLE_PBRS
-                )
+                # Use enhanced reward shaper if enabled
+                if config.USE_ENHANCED_REWARDS:
+                    self.reward_shaper = EnhancedRewardShaper(
+                        curriculum_phase=curriculum_phase,
+                        gamma=config.GAMMA,
+                        enable_pbrs=config.ENABLE_PBRS
+                    )
+                    
+                    # Set enhanced frame-by-frame reward weights
+                    self.reward_shaper.update_frame_weights({
+                        'survival': config.REWARD_SURVIVAL,
+                        'engagement': config.REWARD_ENGAGEMENT,
+                        'movement_quality': config.REWARD_MOVEMENT_QUALITY,
+                        'action_smoothness': config.REWARD_ACTION_SMOOTHNESS,
+                        'momentum': config.REWARD_MOMENTUM,
+                        'proximity': config.REWARD_PROXIMITY,
+                        'activity': config.REWARD_ACTIVITY,
+                    })
+                    
+                    # Set reward normalization
+                    self.reward_shaper.adaptive_scaling = config.REWARD_NORMALIZATION
+                    self.reward_shaper.reward_clip_min = config.REWARD_CLIP_MIN
+                    self.reward_shaper.reward_clip_max = config.REWARD_CLIP_MAX
+                    
+                    logger.info(f"✅ Enhanced reward shaper initialized - Frame-by-frame rewards enabled")
+                else:
+                    self.reward_shaper = RewardShaper(
+                        curriculum_phase=curriculum_phase,
+                        gamma=config.GAMMA,
+                        enable_pbrs=config.ENABLE_PBRS
+                    )
                 
                 # Set reward shaper parameters from config
                 self.reward_shaper.alignment_power = config.REWARD_ALIGNMENT_POWER
@@ -166,11 +198,12 @@ class ActorProcess:
         self.movement_patterns = []  # Store learned patterns
         self.pattern_match_threshold = 0.7  # Similarity threshold for pattern matching
         
-        # Exploration strategy
+        # Exploration strategy - will use autonomous learner's exploration rate if available
         self.exploration_enabled = True
-        self.epsilon = 0.3  # Start with 30% random exploration
+        self.epsilon = 0.3  # Start with 30% random exploration (fallback)
         self.epsilon_min = 0.05  # Minimum 5% exploration
         self.epsilon_decay = 0.9995  # Decay epsilon over time
+        self.learner_process = None  # Will be set by agent to access autonomous learner
         self.action_noise_scale = 0.15  # Scale of action noise for exploration
         self.action_diversity_tracker = deque(maxlen=1000)  # Track action diversity
         
@@ -295,6 +328,7 @@ class ActorProcess:
                         self.last_yolo_detection_time = current_time_for_yolo
                         self.cached_detections = detections.copy() if detections else {}
                         self._yolo_frame_count = 0  # Reset counter after detection
+                        
                         # Only log YOLO runs occasionally
                         if not hasattr(self, '_yolo_log_count'):
                             self._yolo_log_count = 0
@@ -311,7 +345,29 @@ class ActorProcess:
                     detections = self.cached_detections
                     yolo_latency = 0
                 
+                # Update dashboard YOLO display (integrated into GUI dashboard)
+                # Use cached detections between YOLO runs, but update frame every frame
+                if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'dashboard') and self.agent.dashboard and frame is not None:
+                    # Get game window frame for overlay (full window, not just center region)
+                    game_window_frame = self.screen_capture.get_game_window_frame() if hasattr(self, 'screen_capture') and self.screen_capture else None
+                    if game_window_frame is not None:
+                        # Update dashboard with latest frame and cached detections (updated every frame!)
+                        self.agent.dashboard.update_yolo_display(game_window_frame, detections)
+                    else:
+                        # Fallback to small frame if game window not available
+                        self.agent.dashboard.update_yolo_display(frame, detections)
+                
                 # Apply reward-based confidence adjustments (optimized - only when YOLO runs)
+                # Lazy initialize YOLO self-learner when YOLO is first used
+                if config.YOLO_SELF_LEARNING_ENABLED and self.yolo_self_learner is None and self.vision_processor.yolo_detector:
+                    try:
+                        from half_sword_ai.perception.yolo_self_learning import YOLOSelfLearner
+                        self.yolo_self_learner = YOLOSelfLearner(self.vision_processor.yolo_detector)
+                        logger.info("YOLO self-learning initialized (lazy load)")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize YOLO self-learner: {e}")
+                        self.yolo_self_learner = None
+                
                 if self.yolo_self_learner and config.YOLO_CONFIDENCE_ADJUSTMENT_ENABLED and yolo_latency > 0:
                     detections = self.yolo_self_learner.adjust_detection_confidence(detections)
                 
@@ -341,6 +397,18 @@ class ActorProcess:
                 if detections.get('nearest_enemy'):
                     game_state['nearest_enemy'] = detections['nearest_enemy']
                     game_state['enemy_direction'] = detections.get('enemy_direction', (0, 0))
+                    # Calculate enemy distance from YOLO detection
+                    enemy = detections['nearest_enemy']
+                    if 'bbox' in enemy:
+                        # Estimate distance from bbox size (larger = closer)
+                        bbox = enemy['bbox']
+                        bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                        # Normalize to approximate distance (inverse relationship)
+                        game_state['enemy_distance'] = max(0.1, 5.0 / (bbox_area / 10000.0 + 0.1))
+                
+                # Track YOLO detection for proof
+                if self.yolo_proof_tracker:
+                    self.yolo_proof_tracker.record_detection(detections, self.frame_count)
                 
                 # Add visual analysis data (motion, quality) to game_state
                 if 'motion' in detections:
@@ -440,19 +508,38 @@ class ActorProcess:
                 
                 # 3. Check for human override ONLY if we're in AUTONOMOUS mode
                 # Don't check if already in MANUAL mode to prevent fighting for control
+                current_mode_before_check = self.input_mux.mode.value
+                logger.debug(f"[ACTOR] Frame {self.frame_count} | Mode check | "
+                           f"current_mode={current_mode_before_check} | "
+                           f"will_check_override={current_mode_before_check == 'autonomous'}")
+                
                 if self.input_mux.mode.value == 'autonomous' and self.input_mux.check_human_override():
                     # Human detected - switch to manual mode immediately
+                    detection_conf = getattr(self.input_mux, 'detection_confidence', 0.0)
+                    bot_injecting = getattr(self.input_mux, 'bot_injecting', False)
                     logger.info(f"[MODE SWITCH] Human input detected - switching AUTONOMOUS -> MANUAL | Frame: {self.frame_count}")
-                    logger.debug(f"[MODE SWITCH] Detection confidence: {getattr(self.input_mux, 'detection_confidence', 0.0):.2f} | Bot injecting: {getattr(self.input_mux, 'bot_injecting', False)}")
+                    logger.debug(f"[MODE SWITCH] Details | "
+                               f"detection_confidence={detection_conf:.2f} | "
+                               f"bot_injecting={bot_injecting} | "
+                               f"frame={self.frame_count} | "
+                               f"timestamp={time.time()}")
                     self.input_mux.force_manual_mode()
+                    logger.debug(f"[MODE SWITCH] Mode changed | "
+                               f"new_mode={self.input_mux.mode.value} | "
+                               f"verification={self.input_mux.mode.value == 'manual'}")
                     if self.perf_monitor:
                         self.perf_monitor.record_warning("Human override detected", "input_mux")
+                        logger.debug(f"[MODE SWITCH] Warning recorded in performance monitor")
                 
                 # 4. Model inference or human control
                 # Check mode FIRST - if MANUAL, skip bot action generation entirely
                 # This prevents bot from fighting for control when human is active
                 current_mode = self.input_mux.mode.value
                 human_active = (current_mode == 'manual')
+                logger.debug(f"[ACTOR] Frame {self.frame_count} | Action decision | "
+                           f"mode={current_mode} | "
+                           f"human_active={human_active} | "
+                           f"will_generate_bot_action={not human_active}")
                 
                 # Log mode state for debugging
                 if self.frame_count % 60 == 0:  # Log every 60 frames (1 second at 60 FPS)
@@ -466,11 +553,17 @@ class ActorProcess:
                 # If human is active, skip bot action generation completely
                 if human_active:
                     logger.debug(f"[HUMAN ACTIVE] Frame {self.frame_count} | Skipping bot action generation - human has control")
-                    # Human is controlling - only record human actions, don't generate bot actions
-                    human_input = self.input_mux.get_last_human_input()
+                    # Human is controlling - get CURRENT human input (continuously polls)
+                    # CRITICAL: Use get_current_human_input() to capture ALL movements and button holds
+                    human_input = self.input_mux.get_current_human_input()
                     if human_input is not None:
                         human_action = human_input
-                        logger.debug(f"[HUMAN ACTIVE] Got last human input: dx={human_input[0]:.3f}, dy={human_input[1]:.3f}, buttons={human_input[2] if len(human_input) > 2 else {}}")
+                        logger.debug(f"[HUMAN ACTIVE] Got current human input: dx={human_input[0]:.3f}, dy={human_input[1]:.3f}, buttons={human_input[2] if len(human_input) > 2 else {}}")
+                    else:
+                        # Still get button states even if no mouse movement
+                        current_buttons = self.input_mux._get_current_button_states() if hasattr(self.input_mux, '_get_current_button_states') else {}
+                        human_action = (0.0, 0.0, current_buttons)
+                        logger.debug(f"[HUMAN ACTIVE] No mouse movement but buttons might be held: {current_buttons}")
                     # Skip bot action generation - human has control
                     inference_latency = 0.0
                 else:
@@ -652,6 +745,19 @@ class ActorProcess:
                                 self._human_action_log_frame_count = 0
                             # #endregion
                         
+                        # Calculate reward first (needed for logging and recording)
+                        human_action_array = None
+                        if mouse_delta_for_recording is not None:
+                            # Convert mouse delta to action array format
+                            if isinstance(mouse_delta_for_recording, (tuple, list)) and len(mouse_delta_for_recording) >= 2:
+                                human_action_array = np.array([float(mouse_delta_for_recording[0]), float(mouse_delta_for_recording[1])])
+                            else:
+                                human_action_array = None
+                        else:
+                            human_action_array = None
+                        reward = self._calculate_reward(game_state, frame=frame, action=human_action_array)
+                        td_error_estimate = abs(reward)  # Simple estimate based on reward magnitude
+                        
                         # Record with optimized context (use frame reference, not copy)
                         logger.debug(f"[HUMAN RECORD] Frame {self.frame_count} | Recording action: mouse_delta={mouse_delta_for_recording}, buttons={buttons}, reward={reward:.4f}")
                         self.human_recorder.record_action(
@@ -706,11 +812,13 @@ class ActorProcess:
                     # Skip bot action recording when human is active - human has full control
                     # Bot action is None when human is active, so nothing to record
                     # Continue to next frame - don't generate or inject bot actions
+                    # CRITICAL: Still increment frame_count and continue loop
+                    self.frame_count += 1
                     elapsed = time.time() - loop_start
                     sleep_time = max(0, frame_time - elapsed)
                     if elapsed < frame_time:
                         time.sleep(min(sleep_time, 0.001))
-                    continue  # Skip bot action generation completely
+                    continue  # Skip bot action generation completely - loop continues
                 
                 # ALSO record human actions even when bot is controlling (for continuous learning)
                 # This allows the bot to learn from human corrections even during autonomous mode
@@ -866,8 +974,6 @@ class ActorProcess:
                                 
                                 # Record for self-learning (after successful injection)
                                 self._record_bot_action(frame, game_state, bot_action, was_injected=True)
-                            else:
-                                logger.warning("Bot action is None - cannot inject")
                             
                             # Record detection-action-reward pair for YOLO self-learning
                             if self.yolo_self_learner and self.last_detection_before_action:
@@ -949,10 +1055,16 @@ class ActorProcess:
                     self.yolo_self_learner.total_labels_created >= config.YOLO_SELF_TRAINING_INTERVAL and
                     current_time - self.last_yolo_training > 300):  # Train every 5 minutes max
                     
-                    logger.info(f"🔄 YOLO self-training triggered ({self.yolo_self_learner.total_labels_created} labels created)")
+                    labels_before = self.yolo_self_learner.total_labels_created
+                    logger.info(f"🔄 YOLO self-training triggered ({labels_before} labels created)")
                     self.yolo_self_learner.train_on_self_labels(epochs=5)
                     self.last_yolo_training = current_time
                     self.yolo_self_training_count += 1
+                    
+                    # Track YOLO self-learning for proof
+                    if self.yolo_proof_tracker:
+                        labels_after = self.yolo_self_learner.total_labels_created
+                        self.yolo_proof_tracker.record_yolo_self_learning(labels_after - labels_before)
                 
                 # Generate performance report periodically
                 if self.perf_monitor and current_time - self.last_perf_report > config.PERFORMANCE_REPORT_INTERVAL:
@@ -996,17 +1108,29 @@ class ActorProcess:
                 
                 # Check if we should stop due to errors
                 error_type = type(e).__name__
-                critical_errors = ['MemoryError', 'SystemError']
+                critical_errors = ['MemoryError', 'SystemError', 'KeyboardInterrupt']
                 
                 if error_type in critical_errors:
                     logger.critical(f"[ACTOR LOOP ERROR] Critical error {error_type} - stopping actor loop | Frame: {self.frame_count}")
                     self.running = False
                     break
                 else:
-                    # Non-critical error - log and continue
+                    # Non-critical error - log and continue with recovery
                     logger.warning(f"[ACTOR LOOP ERROR] Non-critical error in actor loop: {e} - continuing | Frame: {self.frame_count}")
+                    
+                    # Try to recover from common errors
+                    try:
+                        # Reset input mux if it's in a bad state
+                        if hasattr(self, 'input_mux') and self.input_mux:
+                            # Clear any stuck injection flags
+                            if hasattr(self.input_mux, 'bot_injection_lock'):
+                                with self.input_mux.bot_injection_lock:
+                                    self.input_mux.bot_injecting = False
+                    except Exception as recovery_error:
+                        logger.debug(f"Recovery attempt failed: {recovery_error}")
                 
-                time.sleep(0.1)  # Brief pause before retrying
+                # Brief pause before retrying (but don't sleep too long)
+                time.sleep(0.01)  # Reduced from 0.1s to 10ms for faster recovery
     
     def stop(self):
         """Stop actor process"""
@@ -1024,6 +1148,8 @@ class ActorProcess:
     
     def _get_bot_action(self, frame: np.ndarray, game_state: Dict) -> Optional[torch.Tensor]:
         """Get action from neural network - enhanced with pattern matching"""
+        # DEBUG LOGGING
+        # logger.debug("_get_bot_action called")
         try:
             # Ensure frame is valid
             if frame is None:
@@ -1165,9 +1291,14 @@ class ActorProcess:
                         discrete_action.squeeze()
                     ])
             
-            # EXPLORATION: Epsilon-greedy strategy
+            # EXPLORATION: Epsilon-greedy strategy (use autonomous learner's exploration rate if available)
             import random
-            if self.exploration_enabled and random.random() < self.epsilon:
+            # Get exploration rate from autonomous learner if available
+            exploration_rate = self.epsilon
+            if self.learner_process and hasattr(self.learner_process, 'autonomous_learner'):
+                exploration_rate = self.learner_process.autonomous_learner.get_exploration_rate()
+            
+            if self.exploration_enabled and random.random() < exploration_rate:
                 # Random exploration action
                 exploration_action = self._get_exploration_action(game_state)
                 # Convert to same type as action
@@ -1297,6 +1428,9 @@ class ActorProcess:
                 self.action_diversity_tracker.append(action_np.copy())
                 self._action_diversity_frame_count = 0
             
+            if action_np is None:
+                logger.error("CRITICAL: action_np is None before return!")
+                return self._get_fallback_action(game_state).cpu().detach().numpy()
             return action_np
             
         except Exception as e:
@@ -1407,7 +1541,8 @@ class ActorProcess:
             return torch.zeros(6, dtype=torch.float32)
     
     def _prepare_state_features(self, game_state: Dict) -> np.ndarray:
-        """Prepare state features for model (handles None values safely)"""
+        """Prepare state features for model (handles None values safely)
+        Now includes YOLO detection features for better learning"""
         position = game_state.get("position", {})
         if not isinstance(position, dict):
             position = {}
@@ -1481,7 +1616,7 @@ class ActorProcess:
             }
             
             # Only inject if there's actual movement or button press
-            if abs(delta_x) > 0.01 or abs(delta_y) > 0.01 or any(buttons.values()):
+            if abs(delta_x) > 0.001 or abs(delta_y) > 0.001 or any(buttons.values()):
                 self.input_mux.inject_action(delta_x, delta_y, buttons)
             else:
                 logger.debug(f"Skipping injection - action too small: dx={delta_x:.4f}, dy={delta_y:.4f}")
@@ -1502,6 +1637,10 @@ class ActorProcess:
             # Pass frame for screen-based reward detection and action for energy efficiency
             reward = self._calculate_reward(game_state, frame=frame, action=action)
             
+            # Track YOLO-enhanced reward for proof
+            if self.yolo_proof_tracker:
+                self.yolo_proof_tracker.record_reward_with_yolo(reward, game_state, self.frame_count)
+            
             # Enhanced reward shaping is already handled in _calculate_reward via reward_shaper
             # No additional shaping needed here
             
@@ -1516,6 +1655,7 @@ class ActorProcess:
             
             # Store in replay buffer with enhanced metadata
             # next_state will be set to None initially, then updated next frame
+            has_yolo_data = bool(game_state.get('detections', {}).get('objects'))
             self.replay_buffer.push(
                 state=frame,
                 action=action,
@@ -1527,6 +1667,10 @@ class ActorProcess:
                 td_error=td_error,
                 temporal_weight=1.0
             )
+            
+            # Track buffer addition for proof
+            if self.yolo_proof_tracker:
+                self.yolo_proof_tracker.record_buffer_addition(has_yolo_data, self.frame_count)
             
             # Track recording stats
             if not hasattr(self, '_bot_action_count'):
@@ -1710,19 +1854,15 @@ class ActorProcess:
                         self.perf_monitor.current_episode.get("deaths", 0) + 1
         
         # 4. Comprehensive reward shaping (multi-layered architecture)
-        # Throttle reward shaping to every 3 frames for better FPS
+        # ENHANCED: Calculate every frame for better learning signal
         if self.reward_shaper:
-            if not hasattr(self, '_reward_shaping_frame_count'):
-                self._reward_shaping_frame_count = 0
-            self._reward_shaping_frame_count += 1
-            
-            if self._reward_shaping_frame_count >= 3:  # Only calculate every 3 frames
+            # Always calculate rewards (no throttling for better learning)
                 try:
                     # Enhance game_state with movement pattern for reward shaper
                     enhanced_state = game_state.copy()
                     
-                    # Add movement pattern if available (throttled - only every 10 frames)
-                    if hasattr(self.input_mux, 'get_movement_pattern') and self.frame_count % 60 == 0:  # Every 60 frames for 60 FPS
+                    # Add movement pattern if available (every frame for better rewards)
+                    if hasattr(self.input_mux, 'get_movement_pattern'):
                         try:
                             movement_pattern = self.input_mux.get_movement_pattern(lookback=5)
                             if movement_pattern:
@@ -1737,8 +1877,8 @@ class ActorProcess:
                     enhanced_state['enemy_distance'] = game_state.get('enemy_distance')
                     enhanced_state['is_attacking'] = game_state.get('is_attacking', False)
                     
-                    # Add human reference pattern for imitation learning (throttled - only every 10 frames)
-                    if hasattr(self, 'human_recorder') and self.human_recorder and self.frame_count % 60 == 0:  # Every 60 frames for 60 FPS
+                    # Add human reference pattern for imitation learning (every frame)
+                    if hasattr(self, 'human_recorder') and self.human_recorder:
                         try:
                             # Get recent human actions (last 5-10 actions)
                             recent_human_actions = self.human_recorder.get_expert_actions(count=10)

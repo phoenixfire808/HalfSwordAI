@@ -34,31 +34,55 @@ class GestureEngine:
         Returns:
             True if successful
         """
-        if total_dx == 0 and total_dy == 0:
+        try:
+            if total_dx == 0 and total_dy == 0:
+                return True
+            
+            # Limit maximum movement to prevent excessive steps
+            max_movement = 1000  # pixels
+            if abs(total_dx) > max_movement or abs(total_dy) > max_movement:
+                logger.warning(f"Gesture movement too large: dx={total_dx}, dy={total_dy} - clamping")
+                total_dx = max(-max_movement, min(max_movement, total_dx))
+                total_dy = max(-max_movement, min(max_movement, total_dy))
+            
+            # Calculate number of steps (limit to prevent excessive steps)
+            num_steps = max(1, int(duration_ms / (self.micro_step_duration * 1000)))
+            num_steps = max(1, min(num_steps, abs(total_dx) + abs(total_dy), 100))  # Cap at 100 steps max
+            
+            # Calculate step size
+            step_dx = total_dx / num_steps
+            step_dy = total_dy / num_steps
+            
+            # Perform micro-steps with error handling
+            for i in range(num_steps):
+                try:
+                    # Round to integer pixels
+                    dx = int(round(step_dx))
+                    dy = int(round(step_dy))
+                    
+                    # Only move if step is significant enough
+                    if abs(dx) >= self.min_step_size or abs(dy) >= self.min_step_size:
+                        if not self.direct_input.move_mouse_relative(dx, dy):
+                            logger.warning(f"Mouse movement failed at step {i}/{num_steps}")
+                            # Continue with remaining steps even if one fails
+                    
+                    # Sleep for micro-step duration (but limit sleep time)
+                    sleep_time = min(self.micro_step_duration, 0.01)  # Cap at 10ms
+                    time.sleep(sleep_time)
+                except Exception as step_error:
+                    logger.error(f"Error in gesture step {i}/{num_steps}: {step_error}")
+                    # Continue with remaining steps
+                    continue
+            
             return True
-        
-        # Calculate number of steps
-        num_steps = max(1, int(duration_ms / (self.micro_step_duration * 1000)))
-        num_steps = max(1, min(num_steps, abs(total_dx) + abs(total_dy)))  # At least 1 step per pixel
-        
-        # Calculate step size
-        step_dx = total_dx / num_steps
-        step_dy = total_dy / num_steps
-        
-        # Perform micro-steps
-        for i in range(num_steps):
-            # Round to integer pixels
-            dx = int(round(step_dx))
-            dy = int(round(step_dy))
-            
-            # Only move if step is significant enough
-            if abs(dx) >= self.min_step_size or abs(dy) >= self.min_step_size:
-                self.direct_input.move_mouse_relative(dx, dy)
-            
-            # Sleep for micro-step duration
-            time.sleep(self.micro_step_duration)
-        
-        return True
+        except Exception as e:
+            logger.error(f"Error in perform_smooth_gesture: {e}", exc_info=True)
+            # Fallback: try single direct movement
+            try:
+                return self.direct_input.move_mouse_relative(total_dx, total_dy)
+            except Exception as fallback_error:
+                logger.error(f"Fallback movement also failed: {fallback_error}")
+                return False
     
     def perform_macro_action(self, action_id: int, action_config: Dict, buttons: Dict[str, bool] = None) -> bool:
         """

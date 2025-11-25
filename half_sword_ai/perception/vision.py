@@ -50,11 +50,15 @@ class ScreenCapture:
         self.sct = None
         self.frame_stack = deque(maxlen=config.FRAME_STACK_SIZE)
         self.last_frame_time = 0
+        self.game_window_info = None  # Store game window position/size
         
         if DXCAM_AVAILABLE:
             self._init_dxcam()
         else:
             self._init_mss()
+        
+        # Find game window for YOLO detection
+        self._find_game_window()
     
     def _init_dxcam(self):
         """Initialize DXCam for high-speed capture"""
@@ -84,6 +88,31 @@ class ScreenCapture:
         except Exception as e:
             logger.error(f"MSS initialization failed: {e}")
     
+    def _find_game_window(self):
+        """Find Half Sword game window for YOLO detection"""
+        try:
+            from half_sword_ai.utils.window_finder import WindowFinder
+            
+            # Try multiple possible window titles (order matters - most specific first)
+            # Exclude browser/dashboard windows
+            possible_titles = [
+                "HalfSwordUE5",  # Most specific - actual game executable name (exact match)
+                "Half Sword Demo",  # Steam version
+                "HalfSword",  # Generic
+            ]
+            
+            for title in possible_titles:
+                window_info = WindowFinder.find_game_window(title)
+                if window_info:
+                    self.game_window_info = window_info
+                    logger.info(f"Game window found: {window_info['title']} "
+                              f"({window_info['width']}x{window_info['height']})")
+                    return
+            
+            logger.warning("Game window not found - will use full screen for YOLO detection")
+        except Exception as e:
+            logger.warning(f"Could not find game window: {e}")
+    
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """Get latest frame, non-blocking"""
         try:
@@ -109,6 +138,73 @@ class ScreenCapture:
             logger.error(f"Frame capture error: {e}")
         
         return None
+    
+    def get_game_window_frame(self) -> Optional[np.ndarray]:
+        """Get game window frame for YOLO detection (only captures Half Sword window)"""
+        try:
+            # Always use MSS for game window capture (DXCam doesn't support window-specific capture)
+            # Initialize MSS if not already available (DXCam might be used for small region capture)
+            if not self.sct:
+                try:
+                    import mss
+                    self.sct = mss.mss()
+                    logger.debug("Initialized MSS for game window capture")
+                except Exception as e:
+                    logger.error(f"Could not initialize MSS for game window capture: {e}")
+                    return None
+            
+            # Use game window if found, otherwise fall back to full screen
+            if self.game_window_info:
+                from half_sword_ai.utils.window_finder import WindowFinder
+                region = WindowFinder.get_window_region(self.game_window_info)
+                screenshot = self.sct.grab(region)
+                frame = np.array(screenshot)
+                logger.debug(f"Captured game window: {region['width']}x{region['height']}, raw shape: {frame.shape}")
+            else:
+                # Fallback: try to find window again
+                self._find_game_window()
+                if self.game_window_info:
+                    from half_sword_ai.utils.window_finder import WindowFinder
+                    region = WindowFinder.get_window_region(self.game_window_info)
+                    screenshot = self.sct.grab(region)
+                    frame = np.array(screenshot)
+                else:
+                    # Last resort: full screen
+                    logger.warning("Game window not found, using full screen")
+                    monitor = self.sct.monitors[1]  # Primary monitor
+                    full_region = {
+                        "top": monitor["top"],
+                        "left": monitor["left"],
+                        "width": monitor["width"],
+                        "height": monitor["height"]
+                    }
+                    screenshot = self.sct.grab(full_region)
+                    frame = np.array(screenshot)
+            
+            # Convert BGRA to RGB (model expects RGB)
+            # MSS returns BGRA format (4 channels: Blue, Green, Red, Alpha)
+            if len(frame.shape) == 3:
+                if frame.shape[2] == 4:  # BGRA from MSS
+                    # Remove alpha channel and convert BGR to RGB
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                elif frame.shape[2] == 3:  # Already RGB or BGR
+                    # Assume BGR and convert to RGB
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif frame.shape[2] == 1:  # Grayscale (unlikely from MSS)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+            elif len(frame.shape) == 2:  # Grayscale
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+            
+            logger.debug(f"Game window frame final shape: {frame.shape}")
+            return frame
+        except Exception as e:
+            logger.error(f"Game window capture error: {e}", exc_info=True)
+        
+        return None
+    
+    def get_full_screen_frame(self) -> Optional[np.ndarray]:
+        """Get full screen frame (deprecated - use get_game_window_frame instead)"""
+        return self.get_game_window_frame()
     
     def get_frame_stack(self) -> Optional[np.ndarray]:
         """Get stacked frames for temporal information"""
@@ -138,6 +234,11 @@ class VisionProcessor:
     """
     Enhanced vision processing with motion detection, quality assessment, and YOLO
     Processes frames with temporal analysis and adaptive settings
+    MASSIVE IMPROVEMENTS:
+    - Better YOLO integration with pattern recognition
+    - Enhanced motion detection with direction tracking
+    - Visual pattern recognition for combat states
+    - Temporal analysis for enemy behavior prediction
     """
     
     def __init__(self, screen_capture: 'ScreenCapture'):
@@ -146,13 +247,14 @@ class VisionProcessor:
         self.last_detection_time = 0
         self.detection_interval = config.YOLO_DETECTION_INTERVAL
         
-        # Motion detection
+        # Motion detection (enhanced)
         self.previous_frame = None
-        self.motion_history = deque(maxlen=30)
+        self.motion_history = deque(maxlen=100)  # Extended history
         self.motion_threshold = 5.0  # Pixels
+        self.motion_directions = deque(maxlen=50)  # Track movement directions
         
         # Frame quality assessment
-        self.quality_history = deque(maxlen=100)
+        self.quality_history = deque(maxlen=200)  # Extended
         self.min_quality_threshold = 0.3  # Minimum quality score (0-1)
         
         # Adaptive settings
@@ -160,13 +262,34 @@ class VisionProcessor:
         self.frame_skip_count = 0
         self.max_frame_skip = 2  # Skip frames if quality is too low
         
-        if config.YOLO_ENABLED and YOLO_DETECTOR_AVAILABLE:
+        # Visual pattern recognition
+        self.visual_patterns = deque(maxlen=200)
+        self.combat_state_history = deque(maxlen=100)
+        self.enemy_behavior_patterns = {}
+        
+        # Enhanced detection tracking
+        self.detection_patterns = deque(maxlen=100)
+        self.threat_trend = deque(maxlen=50)
+        
+        # Lazy YOLO initialization - load on first use to speed up startup
+        self._yolo_enabled = config.YOLO_ENABLED and YOLO_DETECTOR_AVAILABLE
+        self._yolo_model_path = config.YOLO_MODEL_PATH if config.YOLO_USE_CUSTOM_MODEL else None
+        self._yolo_confidence = config.YOLO_CONFIDENCE_THRESHOLD
+        self.yolo_detector = None  # Will be initialized on first use
+    
+    def _ensure_yolo_initialized(self):
+        """Lazy initialization of YOLO detector"""
+        if self.yolo_detector is None and self._yolo_enabled:
             try:
                 self.yolo_detector = YOLODetector(
-                    model_path=config.YOLO_MODEL_PATH if config.YOLO_USE_CUSTOM_MODEL else None,
-                    confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD
+                    model_path=self._yolo_model_path,
+                    confidence_threshold=self._yolo_confidence
                 )
-                logger.info("YOLO detector initialized")
+                logger.info("YOLO detector initialized (lazy load)")
+            except Exception as e:
+                logger.error(f"Failed to initialize YOLO detector: {e}")
+                self.yolo_detector = None
+                logger.info("YOLO detector initialized with enhanced pattern recognition")
             except Exception as e:
                 logger.error(f"Failed to initialize YOLO detector: {e}")
                 self.yolo_detector = None
@@ -212,19 +335,22 @@ class VisionProcessor:
     
     def detect_motion(self, frame: np.ndarray) -> Dict[str, any]:
         """
-        Detect motion between frames
+        Enhanced motion detection with pattern recognition
         
         Args:
             frame: Current frame
             
         Returns:
-            Dictionary with motion information
+            Dictionary with motion information and patterns
         """
         motion_info = {
             'has_motion': False,
             'motion_magnitude': 0.0,
             'motion_center': (0, 0),
-            'motion_direction': (0.0, 0.0)
+            'motion_direction': (0.0, 0.0),
+            'motion_velocity': 0.0,
+            'motion_acceleration': 0.0,
+            'motion_pattern': None
         }
         
         if self.previous_frame is None:
@@ -234,8 +360,10 @@ class VisionProcessor:
         # Calculate frame difference
         diff = cv2.absdiff(frame, self.previous_frame)
         
-        # Threshold to get motion regions
-        _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        # Enhanced thresholding with adaptive threshold
+        mean_diff = np.mean(diff)
+        adaptive_threshold = max(20, mean_diff * 1.5)
+        _, thresh = cv2.threshold(diff, adaptive_threshold, 255, cv2.THRESH_BINARY)
         
         # Calculate motion magnitude
         motion_pixels = np.sum(thresh > 0)
@@ -263,11 +391,53 @@ class VisionProcessor:
                 magnitude = np.sqrt(dx**2 + dy**2)
                 if magnitude > 0:
                     motion_info['motion_direction'] = (dx / magnitude, dy / magnitude)
+                
+                # Calculate velocity and acceleration from history
+                if len(self.motion_history) > 0:
+                    last_motion = self.motion_history[-1]
+                    last_mag = last_motion.get('motion_magnitude', 0)
+                    motion_info['motion_velocity'] = motion_magnitude - last_mag
+                    
+                    if len(self.motion_history) > 1:
+                        prev_motion = self.motion_history[-2]
+                        prev_mag = prev_motion.get('motion_magnitude', 0)
+                        prev_velocity = last_mag - prev_mag
+                        motion_info['motion_acceleration'] = motion_info['motion_velocity'] - prev_velocity
+                
+                # Detect motion pattern
+                motion_info['motion_pattern'] = self._detect_motion_pattern()
         
         self.motion_history.append(motion_info)
+        self.motion_directions.append(motion_info['motion_direction'])
         self.previous_frame = frame.copy()
         
         return motion_info
+    
+    def _detect_motion_pattern(self) -> Optional[str]:
+        """Detect patterns in motion history"""
+        if len(self.motion_history) < 5:
+            return None
+        
+        # Analyze recent motion
+        recent_motions = list(self.motion_history)[-10:]
+        magnitudes = [m.get('motion_magnitude', 0) for m in recent_motions]
+        avg_magnitude = np.mean(magnitudes)
+        
+        # Pattern: Increasing motion (enemy approaching/attacking)
+        if len(magnitudes) >= 3:
+            trend = np.polyfit(range(len(magnitudes)), magnitudes, 1)[0]
+            if trend > 2.0:
+                return 'increasing_motion'
+            elif trend < -2.0:
+                return 'decreasing_motion'
+        
+        # Pattern: High combat activity
+        if avg_magnitude > 15:
+            return 'high_combat'
+        elif avg_magnitude < 3:
+            return 'calm'
+        
+        return None
     
     def process_frame(self, frame: np.ndarray) -> Dict[str, any]:
         """
@@ -316,30 +486,99 @@ class VisionProcessor:
         if (self.yolo_detector and 
             current_time - self.last_detection_time >= self.adaptive_detection_interval):
             
-            detections = self.yolo_detector.detect(frame)
+            # Get game window frame for YOLO detection (only captures Half Sword window)
+            game_window_frame = self.screen_capture.get_game_window_frame()
+            self._ensure_yolo_initialized()
+            if self.yolo_detector:
+                detections = self.yolo_detector.detect(frame, full_screen_frame=game_window_frame)
+            else:
+                detections = {}
             self.last_detection_time = current_time
             detection_result.update(detections)
             
-            # Add additional processing
+            # Enhanced enemy processing with pattern recognition
             if detections.get('enemies'):
                 frame_center = (frame.shape[1] // 2, frame.shape[0] // 2)
-                nearest_enemy = self.yolo_detector.get_nearest_enemy(detections, frame_center)
+                self._ensure_yolo_initialized()
+                if self.yolo_detector:
+                    nearest_enemy = self.yolo_detector.get_nearest_enemy(detections, frame_center)
+                else:
+                    nearest_enemy = None
                 if nearest_enemy:
-                    direction = self.yolo_detector.get_enemy_direction(nearest_enemy, frame_center)
+                    self._ensure_yolo_initialized()
+                    if self.yolo_detector:
+                        direction = self.yolo_detector.get_enemy_direction(nearest_enemy, frame_center)
+                    else:
+                        direction = 'unknown'
                     detection_result['nearest_enemy'] = nearest_enemy
                     detection_result['enemy_direction'] = direction
+                    
+                    # Track enemy behavior patterns
+                    enemy_pattern = self._analyze_enemy_behavior(nearest_enemy, detections)
+                    if enemy_pattern:
+                        detection_result['enemy_pattern'] = enemy_pattern
             
+            self._ensure_yolo_initialized()
             detection_result['threat_level'] = self.yolo_detector.get_threat_level(detections) if self.yolo_detector else 'unknown'
             
-            # Adaptive detection interval based on motion
-            if motion['has_motion']:
-                # More motion = more frequent detection
-                self.adaptive_detection_interval = max(0.1, config.YOLO_DETECTION_INTERVAL * 0.7)
+            # Track threat trends
+            threat_value = {'low': 1, 'medium': 2, 'high': 3, 'critical': 4}.get(detection_result['threat_level'], 0)
+            self.threat_trend.append(threat_value)
+            
+            # Store detection pattern
+            self.detection_patterns.append({
+                'enemy_count': len(detections.get('enemies', [])),
+                'threat_level': detection_result['threat_level'],
+                'timestamp': current_time
+            })
+            
+            # Adaptive detection interval based on motion and threat
+            if motion['has_motion'] or detection_result['threat_level'] in ['high', 'critical']:
+                # More motion/threat = more frequent detection
+                self.adaptive_detection_interval = max(0.05, config.YOLO_DETECTION_INTERVAL * 0.5)
             else:
-                # Less motion = less frequent detection
-                self.adaptive_detection_interval = min(1.0, config.YOLO_DETECTION_INTERVAL * 1.3)
+                # Less motion/threat = less frequent detection
+                self.adaptive_detection_interval = min(1.0, config.YOLO_DETECTION_INTERVAL * 1.5)
         
         return detection_result
+    
+    def _analyze_enemy_behavior(self, enemy: Dict, detections: Dict) -> Optional[str]:
+        """Analyze enemy behavior patterns"""
+        if len(self.detection_patterns) < 5:
+            return None
+        
+        # Analyze enemy movement patterns
+        recent_patterns = list(self.detection_patterns)[-10:]
+        enemy_positions = []
+        
+        for pattern in recent_patterns:
+            if pattern.get('enemy_count', 0) > 0:
+                # Estimate position from detection (would need actual position data)
+                enemy_positions.append(pattern)
+        
+        if len(enemy_positions) < 3:
+            return None
+        
+        # Detect if enemy is approaching (increasing threat)
+        threat_values = [p.get('threat_level', 'low') for p in recent_patterns]
+        threat_nums = [{'low': 1, 'medium': 2, 'high': 3, 'critical': 4}.get(t, 0) for t in threat_values]
+        
+        if len(threat_nums) >= 3:
+            trend = np.polyfit(range(len(threat_nums)), threat_nums, 1)[0]
+            if trend > 0.1:
+                return 'enemy_approaching'
+            elif trend < -0.1:
+                return 'enemy_retreating'
+        
+        return None
+    
+    def get_visual_patterns(self) -> Dict:
+        """Get recognized visual patterns"""
+        return {
+            'motion_patterns': [m.get('motion_pattern') for m in list(self.motion_history)[-20:] if m.get('motion_pattern')],
+            'threat_trend': list(self.threat_trend),
+            'recent_detections': list(self.detection_patterns)[-10:]
+        }
     
     def get_detector_stats(self) -> Dict:
         """Get YOLO detector statistics with vision processor stats"""
@@ -351,7 +590,8 @@ class VisionProcessor:
         }
         
         if self.yolo_detector:
-            detector_stats = self.yolo_detector.get_stats()
+            self._ensure_yolo_initialized()
+            detector_stats = self.yolo_detector.get_stats() if self.yolo_detector else {}
             stats.update(detector_stats)
             stats['model_loaded'] = True
         

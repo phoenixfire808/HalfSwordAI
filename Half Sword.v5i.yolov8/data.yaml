@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 4
+names: ['Blood', 'Enemy', 'Player', 'You Won']
+
+roboflow:
+  workspace: drew-kallies-hzwrs
+  project: half-sword-vauap
+  version: 5
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/drew-kallies-hzwrs/half-sword-vauap/dataset/5

@@ -6,6 +6,7 @@ import json
 import time
 import threading
 import logging
+import webbrowser
 from typing import Optional, Dict, Any
 from half_sword_ai.config import config
 
@@ -53,12 +54,9 @@ def convert_to_json_serializable(obj: Any) -> Any:
         return obj
     
     # Check for numpy types
-    if isinstance(obj, (np.integer, np.int8, np.int16, np.int32, np.int64)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
-        return float(obj)
-    elif isinstance(obj, np.bool_):
-        return bool(obj)
+    # Check for numpy types
+    if isinstance(obj, np.generic):
+        return obj.item()
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, dict):
@@ -855,6 +853,8 @@ class DashboardServer:
                 sock.close()
                 if result == 0:
                     logger.info(f"✅ Dashboard server is listening on port {self.port}")
+                    # Automatically open browser once server is confirmed listening
+                    self._open_browser()
                 else:
                     logger.warning(f"⚠️  Dashboard server thread is alive but port {self.port} may not be listening")
             except Exception as e:
@@ -862,6 +862,18 @@ class DashboardServer:
         else:
             logger.error("❌ Dashboard server thread failed to start or died immediately")
             self.running = False
+    
+    def _open_browser(self):
+        """Automatically open browser to dashboard URL"""
+        try:
+            url = f"http://localhost:{self.port}"
+            logger.info(f"🌐 Opening browser to dashboard: {url}")
+            time.sleep(0.5)  # Wait a moment to ensure Flask is fully ready
+            webbrowser.open(url)
+            logger.info(f"✅ Browser opened successfully to dashboard")
+        except Exception as e:
+            logger.warning(f"⚠️  Could not automatically open browser: {e}")
+            logger.info(f"   Please manually open: http://localhost:{self.port}")
     
     def stop(self):
         """Stop dashboard server"""
